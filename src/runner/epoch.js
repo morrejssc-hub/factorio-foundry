@@ -5,11 +5,11 @@
 //     starter inventory. No probe / design / audit phases.
 //   - composition: full 5-phase loop (probe → design → dry-validate →
 //     execute → audit). Operates on an input save, produces an output save.
-import { mkdir, copyFile, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { rconExec } from "../rcon.js";
-import { loadAllModules } from "../lib-loader.js";
+import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
@@ -117,6 +117,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runId}`);
   await mkdir(runDir, { recursive: true });
+  const stagedDir = join(runDir, "staged-modules");
 
   log(`[epoch ${epoch.id}] phase 1: probe`);
   const probeResult = await runProbe({ config, epoch, outDir: join(runDir, "probe") });
@@ -129,11 +130,13 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     state: probeResult.state,
     probeDir: join(runDir, "probe"),
     outDir: join(runDir, "design"),
+    stagedDir,
   });
-  log(`[epoch ${epoch.id}] design ok — placements=${designResult.plan.placements.length}`);
+  log(`[epoch ${epoch.id}] design ok — placements=${designResult.plan.placements.length}` +
+      (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
 
   log(`[epoch ${epoch.id}] phase 3: dry-validate`);
-  const modules = await loadAllModules(config.libDir);
+  const modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
   const dryResult = await runDryValidate({
     plan: designResult.plan,
     modules,
@@ -163,8 +166,27 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   });
   log(`[epoch ${epoch.id}] audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
 
+  // Promote any staged modules to lib/ on audit pass. On audit fail leave
+  // them in the run's staged-modules/ directory for inspection — lib/ stays
+  // clean of unverified artefacts.
+  if (verdict.pass && designResult.authored?.length) {
+    await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
+  } else if (designResult.authored?.length) {
+    log(`[epoch ${epoch.id}] audit failed — staged modules left in ${stagedDir} (not promoted)`);
+  }
+
   await writeDigest({ config, epoch, verdict, runDir });
   return { ok: verdict.pass, verdict, runDir };
+}
+
+async function promoteStagedModules({ config, authored, log, epochId }) {
+  for (const a of authored) {
+    const moduleDest = resolve(config.libDir, "modules", `${a.id}.yaml`);
+    const blueprintDest = resolve(config.libDir, "blueprints", `${a.id}.json`);
+    await copyFile(a.yamlPath, moduleDest);
+    await copyFile(a.jsonPath, blueprintDest);
+    log(`[epoch ${epochId}] promoted staged module '${a.id}' → ${moduleDest} + ${blueprintDest}`);
+  }
 }
 
 async function writeDigest({ config, epoch, verdict, runDir }) {

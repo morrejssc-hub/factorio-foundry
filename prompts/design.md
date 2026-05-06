@@ -13,10 +13,15 @@ you cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
   current world.
 - `epoch.yaml` — the epoch's target metric, allowed modules, and budgets.
 - `lib/modules/*.yaml` — the module library. **You may only select modules
-  that are listed in `epoch.allowed_modules`.** You may not invent new
-  modules in this MVP.
+  that are listed in `epoch.allowed_modules`.** If `epoch.allow_module_creation`
+  is true and the epoch's allowed_modules contains an id not in lib/modules/,
+  you must AUTHOR the missing module before plan.yaml — see "Authoring new
+  modules" below.
 - `lib/blueprints/*.json` — the blueprint that realises each module. You can
   read these to understand the entity layout and starter fuel requirements.
+- `staged-modules/` — present (writable) only when `epoch.allow_module_creation`
+  is true. New module yaml + blueprint json go here, NOT directly into lib/.
+  The runner promotes them to lib/ on audit pass.
 
 ## Output is schema-validated. Read this carefully.
 
@@ -126,6 +131,86 @@ closed schema. Validator does not check inside it. Useful contents:
 - `extra.notes: "..."` — free-form observations.
 
 Use `extra:` instead of inventing new top-level keys.
+
+## Authoring new modules
+
+Triggered when `epoch.allow_module_creation: true` AND `epoch.allowed_modules`
+contains an id that is not present in `lib/modules/`. The runner snapshot's
+this list before invoking you and tells you in the user message which ids
+must be authored. For each such id:
+
+1. **Write `staged-modules/<id>.yaml`** — a module definition with the same
+   shape as `lib/modules/*.yaml`. Required fields:
+
+   ```yaml
+   id: <id>
+   version: 1
+   inputs: []
+   outputs:
+     - { name: <port-name>, side: east, rel_pos: [<x>, <y>],
+         throughput: <number>, item: <factorio-item-name>, kind: belt|inventory }
+   power: { kind: burner, fuel: coal, self_sufficient: <bool> }
+   footprint:
+     min: [<x>, <y>]    # axis-aligned bbox covering ALL entities
+     max: [<x>, <y>]
+   preconditions:
+     - kind: resource_patch
+       resource: <coal|iron-ore|copper-ore|...>
+       min_tiles: <int>
+       description: "<short>"
+   realization:
+     blueprint: lib/blueprints/<id>.json   # path AFTER promotion
+   audits:
+     - id: <id>-throughput
+       script: lib/audits/throughput-window.lua
+       params: { item: <factorio-item-name>, min_rate_per_s: <number>, window_ticks: 3600 }
+   ```
+
+   Read any existing `lib/modules/*.yaml` to confirm the shape; the
+   lib-loader's `validateModule` runs against your file post-exit and
+   rejects unknown / mistyped fields.
+
+2. **Write `staged-modules/<id>.json`** — a blueprint with anchor-relative
+   geometry. Each entity has `key` (stable id), `item` (Factorio item name
+   like `burner-mining-drill`), `dx`/`dy` (anchor-relative; runner adds
+   anchor.x / anchor.y at execute time), and `direction` (lowercase string).
+   Optional `fuel: [{target, item, count}]` pre-loads burner items into the
+   listed entity keys at placement time. Read any existing
+   `lib/blueprints/*.json` to confirm the shape.
+
+   **Geometry tips:**
+   - `burner-mining-drill` is 2x2 (collision -0.7..0.7, selection -1..1);
+     for direction `north` its drop offset is `(-0.5, -1.3)`. East rotation:
+     `(1.3, -0.5)`. Place the drill so its drop tile sits inside the next
+     consumer (a furnace, a belt, etc.).
+   - `stone-furnace` is 2x2 with integer center (e.g. dx=2, dy=0 covers
+     tiles 1..2 in x, -1..0 in y). Drill drop into furnace works when the
+     drop tile is inside the furnace's footprint.
+   - `transport-belt` is 1x1 at `.5` offsets (e.g. dx=1.5, dy=0.5). The
+     `direction` field is the belt's flow direction. Belts can chain by
+     placing them adjacent.
+   - `burner-inserter` is 1x1; its `direction` is the side it picks up
+     FROM. East-facing inserter at (3.5, 0.5) picks from tile (3, 0) and
+     drops at tile (4, 0). Use this to move items from belts into
+     drills/furnaces and from furnace output into chests.
+   - `iron-chest` is 1x1; just a passive store.
+   - The `footprint` field in your module yaml MUST be a bbox that covers
+     every entity in the blueprint. dry-validate computes overlap on this
+     bbox between placements.
+
+3. **Then write `plan.yaml`** that places one (or more) instance(s) of the
+   newly-authored module. The plan validator treats your authored module
+   exactly like a lib module for the purposes of `placements[].module`
+   matching `epoch.allowed_modules`.
+
+### Authoring failure modes
+
+- yaml/json shape errors → validator rejects, you get a focused retry.
+- module passes shape validation but the blueprint's geometry is wrong
+  (e.g. drill drops onto empty floor instead of furnace) → execute may
+  succeed but audit will measure ~0 throughput and the epoch fails. There
+  is no retry of authoring on audit failure in this iteration; iterate by
+  re-running the epoch with prompt adjustments.
 
 ## Budget
 

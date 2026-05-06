@@ -84,6 +84,60 @@ export async function loadAllModules(libDir) {
 }
 
 /**
+ * Load lib/modules/ merged with an optional staged-modules directory. Staged
+ * entries shadow lib entries on id collision (so an in-progress authoring
+ * run doesn't fight a same-id lib module). Staged entries are tagged with
+ * `_staged: true` and the absolute path of their blueprint JSON so execute.js
+ * can pass it inline to factorio_action without going through the workspace
+ * blueprint lookup.
+ *
+ * Used by epochs with `allow_module_creation: true` to expose newly-authored
+ * modules to dry-validate / execute / audit before they're promoted to lib/.
+ *
+ * @param {string} libDir
+ * @param {string|null|undefined} stagedDir — optional dir holding .yaml + .json pairs
+ * @returns {Promise<Map<string, object>>}
+ */
+export async function loadAllModulesWithStaged(libDir, stagedDir) {
+  const merged = await loadAllModules(libDir);
+  if (!stagedDir) return merged;
+  let stagedEntries;
+  try {
+    stagedEntries = await readdir(stagedDir);
+  } catch (error) {
+    if (error.code === "ENOENT") return merged;
+    throw error;
+  }
+  for (const entry of stagedEntries) {
+    if (![".yaml", ".yml"].includes(extname(entry))) continue;
+    const yamlPath = join(stagedDir, entry);
+    const module = await loadModule(yamlPath);
+    // Resolve the module's declared blueprint path against the staged dir
+    // first; fall back to the lib path so a staged yaml can still reference
+    // an unchanged lib blueprint if the new module reuses an old geometry.
+    const blueprintRel = module.realization?.blueprint || "";
+    const blueprintBase = blueprintRel.split("/").pop();
+    const stagedBlueprint = join(stagedDir, blueprintBase);
+    let stagedBlueprintExists = true;
+    try {
+      await readFile(stagedBlueprint, "utf8");
+    } catch (error) {
+      if (error.code === "ENOENT") stagedBlueprintExists = false;
+      else throw error;
+    }
+    const tagged = {
+      ...module,
+      _path: yamlPath,
+      _staged: true,
+      _stagedYamlPath: yamlPath,
+      _stagedBlueprintPath: stagedBlueprintExists ? stagedBlueprint : null,
+    };
+    merged.set(module.id, tagged);
+  }
+  return merged;
+}
+
+/**
  * Compute axis-aligned overlap between two placed module footprints.
  * Returns true iff their bounding boxes (after anchor translation) overlap.
  */

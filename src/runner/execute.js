@@ -40,15 +40,29 @@ async function executeBlueprint({ config, blueprint, anchor, direction, dryRun }
 
 async function placeOne({ config, placement, modules, log }) {
   const module = modules.get(placement.module);
-  const blueprintRel = module.realization.blueprint;
-  // Strip the lib/blueprints/ prefix — the factorio service resolves names
-  // relative to its workspace's blueprints/ dir, which we symlinked to lib/blueprints.
-  const blueprintName = blueprintRel.replace(/^lib\/blueprints\//, "").replace(/\.json$/, "");
+  // Staged modules (newly authored in this run, not yet promoted to lib/)
+  // pass the blueprint as an inline JSON object so the factorio service
+  // doesn't need a workspace blueprint file. Lib modules continue to use
+  // the by-name path so the existing tooling stays untouched.
+  let blueprintArg;
+  let blueprintLabel;
+  if (module._staged && module._stagedBlueprintPath) {
+    const json = JSON.parse(await readFile(module._stagedBlueprintPath, "utf8"));
+    blueprintArg = json;
+    blueprintLabel = `staged:${module.id}`;
+  } else {
+    const blueprintRel = module.realization.blueprint;
+    // Strip the lib/blueprints/ prefix — the factorio service resolves names
+    // relative to its workspace's blueprints/ dir, which we symlinked to lib/blueprints.
+    const blueprintLabelRaw = blueprintRel.replace(/^lib\/blueprints\//, "").replace(/\.json$/, "");
+    blueprintArg = blueprintLabelRaw;
+    blueprintLabel = blueprintLabelRaw;
+  }
   log(`[execute] placement ${placement.id}: module=${module.id} anchor=(${placement.anchor.x},${placement.anchor.y}) direction=${placement.direction}`);
-  log(`[execute]   dryRun ${blueprintName}…`);
+  log(`[execute]   dryRun ${blueprintLabel}…`);
   const dry = await executeBlueprint({
     config,
-    blueprint: blueprintName,
+    blueprint: blueprintArg,
     anchor: placement.anchor,
     direction: placement.direction,
     dryRun: true,
@@ -57,7 +71,7 @@ async function placeOne({ config, placement, modules, log }) {
   log(`[execute]   placing live…`);
   const live = await executeBlueprint({
     config,
-    blueprint: blueprintName,
+    blueprint: blueprintArg,
     anchor: placement.anchor,
     direction: placement.direction,
     dryRun: false,

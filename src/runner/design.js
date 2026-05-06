@@ -5,11 +5,12 @@
 // This is the architectural lever that prevents the "4-miner copy" bug seen
 // in ~/factorio-agent: the agent literally cannot place anything, so its
 // only output channel is a written plan. Composition replaces improvisation.
-import { mkdir, readFile, copyFile, symlink, lstat } from "node:fs/promises";
+import { mkdir, readFile, copyFile, symlink, lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 import { normalize, PLAN_SCHEMA } from "./schema-norm.js";
+import { loadModule } from "../lib-loader.js";
 
 const FORBIDDEN_TOOL_PATTERNS = [
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_action/i,
@@ -57,15 +58,86 @@ function validatePlan(parsed, allowedModules) {
 }
 
 /**
+ * Validate authored module artefacts in the staged directory after the
+ * Designer claims to have written them. Each authored id must produce a yaml
+ * that passes lib-loader's validateModule, and a corresponding blueprint
+ * .json that is at least a parseable object with a non-empty entities array.
+ * (Deeper geometry validation runs in dry-validate.js via execute_blueprint
+ * dryRun — no need to duplicate it here.)
+ *
+ * @param {string} stagedDir
+ * @param {string[]} expectedIds
+ * @returns {Promise<{errors: string[], authored: object[]}>}
+ */
+async function validateStagedModules(stagedDir, expectedIds) {
+  const errors = [];
+  const authored = [];
+  let entries;
+  try {
+    entries = await readdir(stagedDir);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      for (const id of expectedIds) {
+        errors.push(`expected staged module '${id}' but staged-modules/ does not exist`);
+      }
+      return { errors, authored };
+    }
+    throw error;
+  }
+  const yamlNames = new Set(entries.filter((e) => /\.(ya?ml)$/.test(e)));
+  const jsonNames = new Set(entries.filter((e) => /\.json$/.test(e)));
+  for (const id of expectedIds) {
+    const yamlBase = `${id}.yaml`;
+    const ymlBase = `${id}.yml`;
+    const jsonBase = `${id}.json`;
+    if (!yamlNames.has(yamlBase) && !yamlNames.has(ymlBase)) {
+      errors.push(`expected staged module '${id}' yaml at staged-modules/${yamlBase} (or .yml) — not found`);
+      continue;
+    }
+    const yamlPath = join(stagedDir, yamlNames.has(yamlBase) ? yamlBase : ymlBase);
+    let module;
+    try {
+      module = await loadModule(yamlPath);
+    } catch (error) {
+      errors.push(`staged module '${id}' yaml failed schema: ${error.message}`);
+      continue;
+    }
+    if (module.id !== id) {
+      errors.push(`staged module yaml at ${yamlPath} declares id '${module.id}' but is expected to declare '${id}'`);
+      continue;
+    }
+    if (!jsonNames.has(jsonBase)) {
+      errors.push(`expected staged blueprint at staged-modules/${jsonBase} — not found`);
+      continue;
+    }
+    const jsonPath = join(stagedDir, jsonBase);
+    let blueprint;
+    try {
+      blueprint = JSON.parse(await readFile(jsonPath, "utf8"));
+    } catch (error) {
+      errors.push(`staged blueprint '${id}' is not valid JSON: ${error.message}`);
+      continue;
+    }
+    if (!Array.isArray(blueprint.entities) || blueprint.entities.length === 0) {
+      errors.push(`staged blueprint '${id}' must have a non-empty entities array`);
+      continue;
+    }
+    authored.push({ id, yamlPath, jsonPath, module });
+  }
+  return { errors, authored };
+}
+
+/**
  * @param {object} args
  * @param {object} args.config
  * @param {object} args.epoch
  * @param {object} args.state          — from probe phase
  * @param {string} args.probeDir       — plans/<run>/probe/ (state.yaml lives here)
  * @param {string} args.outDir         — plans/<run>/design/
- * @returns {Promise<{planPath: string, plan: object, raw: object}>}
+ * @param {string} [args.stagedDir]    — plans/<run>/staged-modules/ (created if epoch.allow_module_creation)
+ * @returns {Promise<{planPath: string, plan: object, raw: object, authored: object[]}>}
  */
-export async function runDesign({ config, epoch, state, probeDir, outDir }) {
+export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir }) {
   await mkdir(outDir, { recursive: true });
   await copyFile(join(probeDir, "state.yaml"), join(outDir, "state.yaml"));
   await copyFile(epoch._path, join(outDir, "epoch.yaml"));
@@ -73,22 +145,72 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
   // grep modules and read blueprints without being able to escape upward.
   await ensureSymlink(config.libDir, join(outDir, "lib"));
 
+  // If the epoch allows module creation, surface a writable staged-modules/
+  // directory inside the design cwd. The Designer writes new module yaml +
+  // blueprint json there; this runner validates them after the pi exits and
+  // the executor + audit treat them as first-class lib entries until the
+  // outer epoch.js promotes them to lib/ on audit pass.
+  const allowAuthor = !!epoch.allow_module_creation && !!stagedDir;
+  if (allowAuthor) {
+    await mkdir(stagedDir, { recursive: true });
+    await ensureSymlink(stagedDir, join(outDir, "staged-modules"));
+  }
+
   const systemPrompt = await readFile(resolve(config.rootDir, "prompts/design.md"), "utf8");
   const factorioApiDocsExt = resolve(config.rootDir, ".pi/extensions/factorio-api-docs/index.ts");
 
   const allowedModulesList = (epoch.allowed_modules || []).join(", ") || "(none)";
-  const userMessage = [
+
+  // Determine which allowed_modules ids are absent from lib/ and therefore
+  // need to be authored by this Designer run. We snapshot the lib once,
+  // before pi runs, so the missing list is stable across attempts.
+  let mustAuthorIds = [];
+  if (allowAuthor) {
+    const libModuleIds = await readdir(join(config.libDir, "modules")).catch(() => [])
+      .then((ents) => new Set(ents
+        .filter((e) => /\.(ya?ml)$/.test(e))
+        .map((e) => e.replace(/\.(ya?ml)$/, ""))));
+    mustAuthorIds = (epoch.allowed_modules || []).filter((id) => !libModuleIds.has(id));
+  }
+
+  const userMessageLines = [
     `Emit a placement specification for epoch ${epoch.id}.`,
     ``,
     `Inputs in your cwd:`,
     `  - state.yaml (probe output)`,
     `  - epoch.yaml`,
     `  - lib/modules/*.yaml, lib/blueprints/*.json (read-only)`,
+    ...(allowAuthor ? [`  - staged-modules/ (writable: place new module files here)`] : []),
     ``,
     `Allowed modules: ${allowedModulesList}`,
+  ];
+  if (mustAuthorIds.length > 0) {
+    userMessageLines.push(
+      ``,
+      `MODULE AUTHORING REQUIRED. The following allowed_modules ids are NOT`,
+      `present in lib/modules/ and you MUST author them before plan.yaml:`,
+      ...mustAuthorIds.map((id) => `  - ${id}`),
+      ``,
+      `For each id, write two files into staged-modules/:`,
+      `  - staged-modules/<id>.yaml — module definition (use any existing`,
+      `    lib/modules/*.yaml as a shape reference; declare id, version,`,
+      `    inputs, outputs (with port name/side/rel_pos/throughput/item/kind),`,
+      `    power, footprint (anchor-relative bbox covering all entities),`,
+      `    preconditions (resource_patch with min_tiles), realization`,
+      `    (blueprint: lib/blueprints/<id>.json — anticipates promotion),`,
+      `    audits.`,
+      `  - staged-modules/<id>.json — blueprint with anchor-relative dx/dy,`,
+      `    direction per entity, optional fuel[] for pre-loaded burner items.`,
+      `    Use existing lib/blueprints/*.json as a shape reference.`,
+      ``,
+      `After writing the staged files, write plan.yaml that places one (or`,
+      `more) instance(s) of the new module at a viable anchor.`,
+    );
+  }
+  userMessageLines.push(
     ``,
-    `OUTPUT: write a single file plan.yaml in cwd. The validator requires`,
-    `EXACTLY these 5 top-level keys, no more, no less:`,
+    `OUTPUT plan.yaml: write a single file plan.yaml in cwd. The validator`,
+    `requires EXACTLY these 5 top-level keys, no more, no less:`,
     ``,
     `  epoch: ${epoch.id}`,
     `  placements:`,
@@ -105,11 +227,13 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
     `success_criteria, version, module (top-level), starter_fuel, anchor`,
     `(top-level), or any per-step structure. The runner walks, places,`,
     `seeds fuel, waits, audits, and saves on its own; your only job is to`,
-    `pick which module to place and where.`,
+    `pick which module to place and where (and, if required above, to`,
+    `author the module first).`,
     ``,
     `Read state.yaml for world coordinates and lib/modules/ for module`,
     `footprints, then write plan.yaml and exit.`,
-  ].join("\n");
+  );
+  const userMessage = userMessageLines.join("\n");
 
   const piOpts = {
     systemPrompt,
@@ -149,6 +273,15 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
   let errors = validation.errors;
   for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
   if (validation.effective) parsed = validation.effective;
+
+  // If module authoring was required, validate the staged artefacts. Errors
+  // here join the plan errors so retry feedback covers both at once.
+  let authored = [];
+  if (mustAuthorIds.length > 0) {
+    const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
+    authored = stagedResult.authored;
+    errors = [...errors, ...stagedResult.errors];
+  }
 
   // One retry with error feedback (parallel to probe.js). If schema fails,
   // hand the model the validator's specific complaints + its previous output
@@ -196,11 +329,16 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
     errors = validation.errors;
     for (const w of validation.warnings || []) console.log(`[design normalize] ${w} (retry)`);
     if (validation.effective) parsed = validation.effective;
+    if (mustAuthorIds.length > 0) {
+      const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
+      authored = stagedResult.authored;
+      errors = [...errors, ...stagedResult.errors];
+    }
   }
 
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);
   if (errors.length) {
-    throw new Error(`design phase produced invalid plan.yaml:\n  ${errors.join("\n  ")}`);
+    throw new Error(`design phase produced invalid plan.yaml or staged modules:\n  ${errors.join("\n  ")}`);
   }
-  return { planPath, plan: parsed, raw: result };
+  return { planPath, plan: parsed, raw: result, authored };
 }
