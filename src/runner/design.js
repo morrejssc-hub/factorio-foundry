@@ -16,6 +16,9 @@ const FORBIDDEN_TOOL_PATTERNS = [
   /\bfactorio_action\s*\(/,
 ];
 
+const PLAN_REQUIRED_FIELDS = ["epoch", "placements", "connections", "expected_throughput", "why_not_replicate"];
+const PLAN_WRAPPER_KEYS = ["plan", "design", "result", "data", "output"];
+
 async function ensureSymlink(target, linkPath) {
   try {
     const info = await lstat(linkPath);
@@ -26,9 +29,12 @@ async function ensureSymlink(target, linkPath) {
   await symlink(target, linkPath);
 }
 
-function validatePlan(parsed, allowedModules) {
+function validatePlanShape(parsed, allowedModules) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return ["plan.yaml must be a YAML mapping at the top level"];
+  }
   const errors = [];
-  for (const f of ["epoch", "placements", "connections", "expected_throughput", "why_not_replicate"]) {
+  for (const f of PLAN_REQUIRED_FIELDS) {
     if (!(f in parsed)) errors.push(`missing field: ${f}`);
   }
   if (Array.isArray(parsed.placements)) {
@@ -47,6 +53,28 @@ function validatePlan(parsed, allowedModules) {
     }
   }
   return errors;
+}
+
+// Auto-unwrap rescue, parallel to probe.js. Absorbs Pattern B drift where the
+// LLM nests the plan inside a single namespacing dict like `plan: {...}` or
+// `design: {...}` instead of writing a flat schema. Pattern A (wrong shape
+// entirely — `steps`/`entities`/`risks` and no placements) is NOT rescued
+// here; that requires retry with explicit error feedback.
+function validatePlan(parsed, allowedModules) {
+  const direct = validatePlanShape(parsed, allowedModules);
+  if (direct.length === 0) return { effective: parsed, errors: [] };
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const wrapper of PLAN_WRAPPER_KEYS) {
+      const inner = parsed[wrapper];
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        const innerErrors = validatePlanShape(inner, allowedModules);
+        if (innerErrors.length === 0) {
+          return { effective: inner, errors: [], unwrappedFrom: wrapper };
+        }
+      }
+    }
+  }
+  return { effective: parsed, errors: direct };
 }
 
 /**
@@ -137,8 +165,13 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
 
   let text = await readFile(planPath, "utf8").catch(() => null);
   let parsed = text ? parseYaml(text) : null;
-  let errors = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                      : ["plan.yaml not produced"];
+  let validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                          : { effective: null, errors: ["plan.yaml not produced"] };
+  let errors = validation.errors;
+  if (validation.unwrappedFrom) {
+    console.log(`[design] auto-unwrapped plan from top-level "${validation.unwrappedFrom}:" key`);
+    parsed = validation.effective;
+  }
 
   // One retry with error feedback (parallel to probe.js). If schema fails,
   // hand the model the validator's specific complaints + its previous output
@@ -181,8 +214,13 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
 
     text = await readFile(planPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
-    errors = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                    : ["plan.yaml not produced on retry"];
+    validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                        : { effective: null, errors: ["plan.yaml not produced on retry"] };
+    errors = validation.errors;
+    if (validation.unwrappedFrom) {
+      console.log(`[design] auto-unwrapped plan from top-level "${validation.unwrappedFrom}:" key (retry)`);
+      parsed = validation.effective;
+    }
   }
 
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);

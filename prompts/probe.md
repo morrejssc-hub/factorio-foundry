@@ -32,6 +32,7 @@ epoch** if any are missing or wrong-typed:
 | `coal_patches`      | yes      | **array** (use `[]` if none) — element shape below            |
 | `iron_patches`      | yes      | **array** (use `[]` if none) — element shape below            |
 | `notes`             | optional | free-form string                                              |
+| `extra`             | optional | open mapping — see "When to use `extra:`" below               |
 
 **Required field traps that will make the validator reject your output:**
 
@@ -45,9 +46,43 @@ epoch** if any are missing or wrong-typed:
   total_amount: <number>}`. Do not nest extra fields like `peak_tiles`,
   `drill_footprint_coal`, `density_range` inside patch elements — the
   Designer phase does not consume them and they add noise.
-- Do **not** add extra top-level keys (`module`, `anchor`, `target_metric`,
-  `placement_validation`, `phase`, `epoch`, etc.). The schema is closed:
-  produce only the six keys in the table above.
+- Do **not** add extra top-level keys outside the table above. If you have
+  observations that don't fit (resource patches for non-coal/non-iron ores,
+  placement candidates you considered, confidence notes), put them under
+  `extra:` (see below) — never at the top level.
+- **Top-level means top-level.** Do **not** wrap your output in a single
+  namespacing dict like `probe:`, `state:`, `result:`, `findings:`, or
+  `output:`. The validator reads `parsed.tick`, not `parsed.probe.tick`. A
+  rescue path will hoist common wrappers, but you should not rely on it —
+  write the schema flat the first time. Indentation looks like:
+
+  ```yaml
+  tick: 1234         # ← at column 1
+  worker:            # ← at column 1
+    position: ...
+  ```
+
+  Not like:
+
+  ```yaml
+  probe:             # ← WRONG — never wrap the document
+    tick: 1234
+    worker: ...
+  ```
+
+## When to use `extra:`
+
+`extra:` is a sanctioned, **open** mapping for anything that doesn't fit the
+closed schema. Validator does not check inside it. Useful contents:
+
+- Resource patches for ores other than coal/iron (e.g.
+  `extra.copper_patches: [...]`, `extra.stone_patches: [...]`). Same shape
+  as `coal_patches` (array of `{center, tile_count, total_amount}`).
+- Selected anchor candidates the Designer can use as hints
+  (`extra.anchor_hints: [...]`).
+- Confidence / freshness markers (`extra.tick_at_probe: ...`).
+
+Use `extra:` instead of inventing new top-level keys.
 
 ## How to find resource patches
 
@@ -61,6 +96,13 @@ a sensible center (try worker position first; if no patches found, try (0,0)).
 When the epoch goal mentions iron, run the script twice — once with default
 `resource` (coal) and once with `resource: "iron-ore"` — so both
 `coal_patches` and `iron_patches` in `state.yaml` reflect actual on-map data.
+
+When the epoch goal mentions a resource that isn't coal or iron (copper-ore,
+stone, etc.), run the script for that resource as well and put the result in
+`extra.<resource>_patches:` using the same element shape — e.g.
+`extra.copper_patches: [{center, tile_count, total_amount}]`. The Designer
+will look there for non-stock ores. Still emit `coal_patches:` and
+`iron_patches:` (use `[]` if not relevant) so the closed schema is satisfied.
 
 The older `lib/find-coal-patch.lua` is still present as a coal-only shim, but
 prefer the generalized script above so iron/copper/etc. probes use the same
@@ -91,6 +133,30 @@ iron_patches: []
 notes: |
   Large coal patch ~48 tiles SW of worker. No iron in 100-tile radius
   (not needed for this epoch).
+```
+
+For an epoch targeting copper-ore, the same document with copper patches in
+`extra:` looks like:
+
+```yaml
+tick: 51394
+worker:
+  position: { x: 0, y: 0 }
+inventory_summary:
+  - { item: coal, count: 26 }
+  - { item: burner-mining-drill, count: 2 }
+  # …
+coal_patches:
+  - { center: { x: -48, y: -85 }, tile_count: 324, total_amount: 313549 }
+iron_patches:
+  - { center: { x: -8, y: -44 }, tile_count: 717, total_amount: 367466 }
+extra:
+  copper_patches:
+    - { center: { x: 35, y: 22 }, tile_count: 280, total_amount: 250000 }
+notes: |
+  e1 coal cell + e2 iron line both still running. Copper patch found ~40
+  tiles ENE of worker; placed under extra: because it's not in the closed
+  schema's required keys.
 ```
 
 ## Budget

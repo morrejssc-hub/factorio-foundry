@@ -37,6 +37,7 @@ epoch** if any are missing. Each placement is also schema-checked.
 | `connections`         | yes      | array (use `[]` if no inter-module wiring) of `{from, to, required_throughput}`       |
 | `expected_throughput` | yes      | number — items/s your plan delivers of the target item                                |
 | `why_not_replicate`   | yes      | string — one sentence justifying composition vs N copies of one module                |
+| `extra`               | optional | open mapping — see "When to use `extra:`" below                                       |
 
 **You are NOT writing a project plan, a runbook, or a step list.** You are
 emitting a placement specification. The runner already knows how to walk,
@@ -47,7 +48,14 @@ place blueprints, seed fuel, wait, and audit — those are not your concern.
 - Do **not** add top-level keys like `entities`, `steps`, `risks`,
   `success_criteria`, `module`, `version`, `starter_fuel`, `anchor`, `id`.
   They are not consumed and a plan that has them but is missing the four
-  required keys above will fail.
+  required keys above will fail. If you have side observations or rationale
+  beyond `why_not_replicate`, put them under `extra:` (see below) — never
+  at the top level.
+- **Top-level means top-level.** Do **not** wrap your output in a single
+  namespacing dict like `plan:`, `design:`, `result:`, or `output:`. The
+  validator reads `parsed.placements`, not `parsed.plan.placements`. A
+  rescue path will hoist common wrappers, but you should not rely on it —
+  write the schema flat the first time.
 - Do **not** describe individual blueprint entities under `placements[]`.
   A `placement` is a **module instance**, not an entity. The blueprint
   specifies the entities; you only pick which module to place and where.
@@ -64,7 +72,11 @@ Each module's `footprint` field gives a min/max bbox in canonical orientation
 module's local frame. You must:
 
 1. Pick anchors so the module's bbox sits over a suitable resource patch
-   (check `state.yaml` patches and the module's `preconditions`).
+   (check `state.yaml` patches and the module's `preconditions`). For
+   coal/iron, use the top-level `coal_patches` / `iron_patches` arrays. For
+   any other resource declared in the module's preconditions (copper-ore,
+   stone, etc.), look under `state.extra.<resource>_patches` — the probe
+   surfaces non-stock resources there.
 2. Avoid placing two modules whose bboxes overlap.
 3. Stay close to the worker's current position so the executor doesn't have
    to traverse the whole map.
@@ -101,6 +113,19 @@ why_not_replicate: |
   Single module exceeds the 0.10 coal/s target by 80%; no need for a second
   cell. One placement keeps the plan minimal and avoids overlapping footprints.
 ```
+
+## When to use `extra:`
+
+`extra:` is a sanctioned, **open** mapping for anything that doesn't fit the
+closed schema. Validator does not check inside it. Useful contents:
+
+- `extra.alternate_anchors: [...]` — anchor candidates you considered but
+  rejected, with one-line reasons.
+- `extra.throughput_breakdown: {...}` — per-module contribution if you have
+  multiple placements.
+- `extra.notes: "..."` — free-form observations.
+
+Use `extra:` instead of inventing new top-level keys.
 
 ## Budget
 

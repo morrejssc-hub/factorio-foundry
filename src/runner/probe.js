@@ -8,6 +8,7 @@ import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 
 const REQUIRED_FIELDS = ["tick", "worker", "inventory_summary", "coal_patches", "iron_patches"];
+const STATE_WRAPPER_KEYS = ["probe", "state", "result", "data", "output"];
 
 async function ensureSymlink(target, linkPath) {
   try {
@@ -19,7 +20,10 @@ async function ensureSymlink(target, linkPath) {
   await symlink(target, linkPath);
 }
 
-function validateState(parsed) {
+function validateStateShape(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return ["state.yaml must be a YAML mapping at the top level"];
+  }
   const errors = [];
   for (const f of REQUIRED_FIELDS) {
     if (!(f in parsed)) errors.push(`missing field: ${f}`);
@@ -31,6 +35,28 @@ function validateState(parsed) {
     errors.push("worker.position must be {x,y}");
   }
   return errors;
+}
+
+// Auto-unwrap rescue: if the LLM produced a single namespacing dict like
+// `probe: { tick, worker, ... }` instead of a flat schema, hoist that inner
+// object so downstream code sees what it expects. Returns { effective, errors,
+// unwrappedFrom? }. Never throws; only used to absorb Pattern B drift seen in
+// e1-run-8 / e2-run-1's first attempt.
+function validateState(parsed) {
+  const direct = validateStateShape(parsed);
+  if (direct.length === 0) return { effective: parsed, errors: [] };
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const wrapper of STATE_WRAPPER_KEYS) {
+      const inner = parsed[wrapper];
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        const innerErrors = validateStateShape(inner);
+        if (innerErrors.length === 0) {
+          return { effective: inner, errors: [], unwrappedFrom: wrapper };
+        }
+      }
+    }
+  }
+  return { effective: parsed, errors: direct };
 }
 
 /**
@@ -80,7 +106,12 @@ export async function runProbe({ config, epoch, outDir }) {
 
   let text = await readFile(stateYamlPath, "utf8").catch(() => null);
   let parsed = text ? parseYaml(text) : null;
-  let errors = parsed ? validateState(parsed) : ["state.yaml not produced"];
+  let validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced"] };
+  let errors = validation.errors;
+  if (validation.unwrappedFrom) {
+    console.log(`[probe] auto-unwrapped state from top-level "${validation.unwrappedFrom}:" key`);
+    parsed = validation.effective;
+  }
 
   // One retry: if the first attempt failed schema (or didn't write the file),
   // feed the previous attempt's content + validator errors back to a fresh
@@ -114,7 +145,12 @@ export async function runProbe({ config, epoch, outDir }) {
 
     text = await readFile(stateYamlPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
-    errors = parsed ? validateState(parsed) : ["state.yaml not produced on retry"];
+    validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced on retry"] };
+    errors = validation.errors;
+    if (validation.unwrappedFrom) {
+      console.log(`[probe] auto-unwrapped state from top-level "${validation.unwrappedFrom}:" key (retry)`);
+      parsed = validation.effective;
+    }
   }
 
   if (!text) {
