@@ -1,13 +1,11 @@
 id: factorio-foundry-mvp
 description: |
-  MVP epoch chain. Bootstrap creates the initial save with a starter inventory.
-  e1 places one coal-burner-cell and audits coal throughput; e2 places one
-  iron-smelt-line on top of the e1 save and audits iron-plate; e3 places one
-  copper-smelt-line on top of the e2 save and audits copper-plate. e4 branches
-  back to e0 and places TWO coal-burner-cells in a single plan, exercising
-  multi-placement / footprint non-overlap / force-wide audit summation
-  (orthogonal to the e1-e2-e3 progression — kept on its own branch so its
-  inventory budget stays predictable).
+  MVP epoch chain. e0 bootstraps; e1/e2/e3 progress factory state on a single
+  save chain (coal → iron → copper); e4 branches off e0 to test multi-placement
+  with the existing coal-burner-cell. e5 branches off e0 to test MODULE
+  CREATION — the Designer authors a new coal-cluster-cell module and the
+  pipeline verifies it; on audit pass the module promotes to lib/ for use
+  by future epochs. e5's save is an orphan (no downstream depends_on).
 nodes:
   - id: e0-bootstrap
   - id: e1-first-coal
@@ -17,4 +15,6 @@ nodes:
   - id: e3-first-copper
     depends_on: [e2-first-iron]
   - id: e4-coal-pair
+    depends_on: [e0-bootstrap]
+  - id: e5-coal-cluster-cell
     depends_on: [e0-bootstrap]

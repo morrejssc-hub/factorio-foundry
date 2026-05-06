@@ -1,0 +1,46 @@
+id: e5-coal-cluster-cell
+kind: composition
+depends_on: [e0-bootstrap]
+input_save: state/saves/e0-bootstrap-v1.zip
+allow_module_creation: true
+goal: |
+  Author and verify a NEW module `coal-cluster-cell` that merges 2-4
+  burner-mining-drills into a single placeable unit with shared belt
+  routing and a single output chest. Place one instance of the new module
+  on the coal patch and sustain ≥ 0.40 coal/s for one minute.
+
+  Why this epoch exists: e1-e4 all SELECTED modules from lib/. This is the
+  first epoch where the Designer must AUTHOR a new module. It validates
+  that the architecture supports trigger ("designer recognises a missing
+  module") + completion ("after authoring, the rest of the pipeline
+  treats the new module exactly like any other lib module") in a single
+  end-to-end run.
+
+  This is an orphan branch in the DAG: no downstream epoch depends on
+  e5's output_save. The durable artefact is the promoted module file in
+  lib/ (on audit pass), not the world state. Subsequent epochs that need
+  coal-cluster-cell will branch from a state-chain save (e0-e4) and use
+  the new module from lib/ directly.
+
+  Inventory budget (from e0): 4 burner-mining-drills, 2 stone-furnaces,
+  20 transport-belts, 8 burner-inserters, 4 iron-chests, 50 coal. A
+  2-drill merge needs ~2 drills + 6-8 belts + 4 inserters + 1 chest +
+  10 coal (well within budget). A 4-drill merge is also feasible.
+
+  Threshold rationale: a single coal-burner-cell measures 0.25 coal/s.
+  Two of them (e4) measured 0.50 coal/s. The 0.40 threshold rejects a
+  degenerate single-drill solution but accepts a 2-drill merged design
+  with reasonable belt-stall margin.
+target_metric:
+  audit: lib/audits/throughput-window.lua
+  params:
+    item: coal
+    min_rate_per_s: 0.40
+    window_ticks: 3600    # 60s at 60 TPS
+allowed_modules:
+  - coal-cluster-cell    # NOT in lib/ at run start — Designer must author it
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 1200000   # double — authoring is a bigger task than selection
+  execute_timeout_ms: 600000
+output_save: state/saves/e5-coal-cluster-cell-v1.zip   # orphan: no other epoch depends on this

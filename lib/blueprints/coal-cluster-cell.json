@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "name": "coal_cluster_cell_v1",
+  "description": "Two burner-mining-drills on a coal patch share one belt spine; each drill self-fuels from the belt and one output inserter moves surplus coal into a single chest.",
+  "anchor": "southern burner-mining-drill center; place both drill centers on a coal patch",
+  "entities": [
+    {
+      "key": "drill_south",
+      "item": "burner-mining-drill",
+      "dx": 0,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "drill_north",
+      "item": "burner-mining-drill",
+      "dx": 0,
+      "dy": -2,
+      "direction": "east"
+    },
+    {
+      "key": "north_belt_out",
+      "item": "transport-belt",
+      "dx": 1.5,
+      "dy": -2.5,
+      "direction": "east"
+    },
+    {
+      "key": "trunk_north",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": -2.5,
+      "direction": "south"
+    },
+    {
+      "key": "trunk_north_fuel",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": -1.5,
+      "direction": "south"
+    },
+    {
+      "key": "south_belt_out",
+      "item": "transport-belt",
+      "dx": 1.5,
+      "dy": -0.5,
+      "direction": "east"
+    },
+    {
+      "key": "trunk_merge",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": -0.5,
+      "direction": "south"
+    },
+    {
+      "key": "trunk_output",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": 0.5,
+      "direction": "south"
+    },
+    {
+      "key": "fuel_inserter_north",
+      "item": "burner-inserter",
+      "dx": 1.5,
+      "dy": -1.5,
+      "direction": "east"
+    },
+    {
+      "key": "fuel_inserter_south",
+      "item": "burner-inserter",
+      "dx": 1.5,
+      "dy": 0.5,
+      "direction": "east"
+    },
+    {
+      "key": "output_inserter",
+      "item": "burner-inserter",
+      "dx": 3.5,
+      "dy": 0.5,
+      "direction": "west"
+    },
+    {
+      "key": "coal_chest",
+      "item": "iron-chest",
+      "dx": 4.5,
+      "dy": 0.5,
+      "direction": "north"
+    }
+  ],
+  "fuel": [
+    {
+      "target": "drill_south",
+      "item": "coal",
+      "count": 4
+    },
+    {
+      "target": "drill_north",
+      "item": "coal",
+      "count": 4
+    },
+    {
+      "target": "fuel_inserter_south",
+      "item": "coal",
+      "count": 1
+    },
+    {
+      "target": "fuel_inserter_north",
+      "item": "coal",
+      "count": 1
+    },
+    {
+      "target": "output_inserter",
+      "item": "coal",
+      "count": 1
+    }
+  ],
+  "ports": {
+    "coal_output_chest": {
+      "entity": "coal_chest",
+      "kind": "inventory",
+      "item": "coal"
+    }
+  },
+  "assertions": [
+    "worker_selected_anchor_has_coal_context",
+    "both_drills_output_to_shared_belt_spine",
+    "fuel_inserters_feed_drills_from_mined_coal",
+    "single_output_inserter_moves_surplus_coal_to_chest"
+  ]
+}
