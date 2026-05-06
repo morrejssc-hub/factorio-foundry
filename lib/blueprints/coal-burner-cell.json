@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "name": "coal_mining_head_self_fuel_v1",
+  "description": "Reusable burner coal mining head: drill outputs coal onto a belt, one burner inserter refuels the drill from that belt, and another moves surplus coal into a chest.",
+  "anchor": "burner-mining-drill center; worker should place it on a coal patch",
+  "entities": [
+    {
+      "key": "drill",
+      "item": "burner-mining-drill",
+      "dx": 0,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "coal_belt_out",
+      "item": "transport-belt",
+      "dx": 1.5,
+      "dy": -0.5,
+      "direction": "east"
+    },
+    {
+      "key": "coal_belt_turn",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": -0.5,
+      "direction": "south"
+    },
+    {
+      "key": "coal_belt_feed",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": 0.5,
+      "direction": "south"
+    },
+    {
+      "key": "fuel_inserter",
+      "item": "burner-inserter",
+      "dx": 1.5,
+      "dy": 0.5,
+      "direction": "east"
+    },
+    {
+      "key": "output_inserter",
+      "item": "burner-inserter",
+      "dx": 3.5,
+      "dy": 0.5,
+      "direction": "west"
+    },
+    {
+      "key": "coal_chest",
+      "item": "iron-chest",
+      "dx": 4.5,
+      "dy": 0.5,
+      "direction": "north"
+    }
+  ],
+  "fuel": [
+    {
+      "target": "drill",
+      "item": "coal",
+      "count": 2
+    },
+    {
+      "target": "fuel_inserter",
+      "item": "coal",
+      "count": 1
+    },
+    {
+      "target": "output_inserter",
+      "item": "coal",
+      "count": 1
+    }
+  ],
+  "ports": {
+    "coal_output_belt": {
+      "entity": "coal_belt_feed",
+      "kind": "belt",
+      "item": "coal"
+    },
+    "coal_output_chest": {
+      "entity": "coal_chest",
+      "kind": "inventory",
+      "item": "coal"
+    }
+  },
+  "assertions": [
+    "worker_selected_anchor_has_coal_context",
+    "drill_outputs_to_belt_not_chest",
+    "fuel_inserter_feeds_drill_from_mined_coal",
+    "output_inserter_moves_surplus_coal_to_chest"
+  ]
+}

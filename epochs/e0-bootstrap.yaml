@@ -1,0 +1,17 @@
+id: e0-bootstrap
+kind: bootstrap
+goal: |
+  Produce the initial freeplay save with the worker character spawned and a
+  starter inventory sufficient to place one coal-burner-cell module.
+# A bootstrap epoch has no probe / design / audit phases. The Node-side
+# bootstrap routine creates the save and stocks the worker inventory.
+starter_inventory:
+  - { item: burner-mining-drill, count: 4 }
+  - { item: stone-furnace, count: 2 }
+  - { item: transport-belt, count: 20 }
+  - { item: burner-inserter, count: 8 }
+  - { item: iron-chest, count: 4 }
+  - { item: coal, count: 50 }
+  - { item: iron-plate, count: 20 }
+  - { item: stone, count: 10 }
+output_save: state/saves/e0-bootstrap-v1.zip

@@ -1,0 +1,37 @@
+# coal-burner-cell
+#
+# A self-fueling burner-coal mining cell. The drill outputs onto a 3-tile belt
+# loop; one inserter feeds the drill from that belt, another inserter moves
+# surplus into a chest. Net belt output ~0.19 coal/s after self-fueling.
+id: coal-burner-cell
+version: 1
+
+inputs: []
+outputs:
+  - { name: coal_belt, side: south, rel_pos: [2.5, 0.5], throughput: 0.18, item: coal, kind: belt }
+  - { name: coal_chest, side: east, rel_pos: [4.5, 0.5], throughput: 0.0, item: coal, kind: inventory }
+
+power: { kind: burner, fuel: coal, self_sufficient: true }
+
+# Bounding box of all entity tiles, anchor-relative.
+# drill is 3x3 centered at (0,0); chest extends to x=5; y range -1.5..1.5.
+# We pad to whole tiles for placement checks.
+footprint:
+  min: [-1.5, -1.5]
+  max: [5.0, 1.5]
+
+preconditions:
+  - kind: resource_patch
+    resource: coal
+    min_tiles: 9
+    description: "drill 3x3 footprint must overlap a coal patch covering at least the drill area"
+
+realization:
+  blueprint: lib/blueprints/coal-burner-cell.json
+  starter_fuel:
+    - { item: coal, count: 5 }   # bootstrap before self-feed cycle stabilises
+
+audits:
+  - id: coal-burner-cell-throughput
+    script: lib/audits/throughput-window.lua
+    params: { item: coal, min_rate_per_s: 0.1, window_ticks: 3600 }

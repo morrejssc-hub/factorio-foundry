@@ -1,0 +1,8 @@
+node_modules/
+plans/
+state/saves/
+state/digests/
+runtime/
+*.log
+.DS_Store
+factorio-headless_linux_*.tar.xz
