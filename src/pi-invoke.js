@@ -56,10 +56,25 @@ export async function piInvoke(opts) {
   if (noContextFiles) args.push("--no-context-files");
   if (noSkills) args.push("--no-skills");
   if (noBuiltinTools) args.push("--no-builtin-tools");
+  // Per-phase explicit extensions (factorio tools, etc.).
   for (const ext of extensions) args.push("-e", resolve(ext));
+  // FOUNDRY_PI_EXTENSIONS lets the operator inject extra extensions (e.g.
+  // model-router extensions like pi-bailian-models) into every phase
+  // without re-enabling pi's full extension auto-discovery. Comma-separated
+  // absolute paths.
+  const extraExt = (process.env.FOUNDRY_PI_EXTENSIONS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const ext of extraExt) args.push("-e", resolve(ext));
   if (tools && tools.length) args.push("--tools", tools.join(","));
-  if (provider) args.push("--provider", provider);
-  if (model) args.push("--model", model);
+  // FOUNDRY_PI_MODEL / FOUNDRY_PI_PROVIDER let an operator pin the LLM for
+  // every phase from one place (e.g. `FOUNDRY_PI_MODEL=glm-5 npm run epoch
+  // e1-first-coal`). Per-call opts.{provider,model} still win when set.
+  const effectiveProvider = provider ?? process.env.FOUNDRY_PI_PROVIDER;
+  const effectiveModel = model ?? process.env.FOUNDRY_PI_MODEL;
+  if (effectiveProvider) args.push("--provider", effectiveProvider);
+  if (effectiveModel) args.push("--model", effectiveModel);
   if (thinking) args.push("--thinking", thinking);
 
   let scratchDir = null;

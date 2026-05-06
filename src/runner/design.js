@@ -69,15 +69,42 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
   const systemPrompt = await readFile(resolve(config.rootDir, "prompts/design.md"), "utf8");
   const factorioApiDocsExt = resolve(config.rootDir, ".pi/extensions/factorio-api-docs/index.ts");
 
+  const allowedModulesList = (epoch.allowed_modules || []).join(", ") || "(none)";
   const userMessage = [
-    `Run the Design phase for epoch ${epoch.id}.`,
-    `Read state.yaml, epoch.yaml, and lib/ to understand inputs.`,
-    `Write plan.yaml using only modules from epoch.allowed_modules.`,
-    `You have NO factorio tools — only file tools and factorio_api_docs.`,
+    `Emit a placement specification for epoch ${epoch.id}.`,
+    ``,
+    `Inputs in your cwd:`,
+    `  - state.yaml (probe output)`,
+    `  - epoch.yaml`,
+    `  - lib/modules/*.yaml, lib/blueprints/*.json (read-only)`,
+    ``,
+    `Allowed modules: ${allowedModulesList}`,
+    ``,
+    `OUTPUT: write a single file plan.yaml in cwd. The validator requires`,
+    `EXACTLY these 5 top-level keys, no more, no less:`,
+    ``,
+    `  epoch: ${epoch.id}`,
+    `  placements:`,
+    `    - id: p0                                # short string`,
+    `      module: <one of the allowed modules>`,
+    `      anchor: { x: <number>, y: <number> }`,
+    `      direction: <north|east|south|west>    # lowercase only`,
+    `  connections: []                           # use [] if single placement`,
+    `  expected_throughput: <number>             # items/s of target item`,
+    `  why_not_replicate: <one-sentence string>`,
+    ``,
+    `You are NOT writing a runbook. Do NOT add: id (top-level), created,`,
+    `steps, kind, action, depends_on, formula, assert, entities, risks,`,
+    `success_criteria, version, module (top-level), starter_fuel, anchor`,
+    `(top-level), or any per-step structure. The runner walks, places,`,
+    `seeds fuel, waits, audits, and saves on its own; your only job is to`,
+    `pick which module to place and where.`,
+    ``,
+    `Read state.yaml for world coordinates and lib/modules/ for module`,
+    `footprints, then write plan.yaml and exit.`,
   ].join("\n");
 
-  const result = await piInvoke({
-    prompt: userMessage,
+  const piOpts = {
     systemPrompt,
     tools: ["read", "write", "ls", "grep", "find", "factorio_api_docs"],
     extensions: [factorioApiDocsExt],
@@ -86,10 +113,18 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
     timeoutMs: epoch.budgets?.design_timeout_ms ?? 600_000,
     onStdout: (line) => console.log(`[design pi] ${line}`),
     onStderr: (line) => process.stderr.write(`[design pi err] ${line}\n`),
-  });
+  };
+
+  const planPath = join(outDir, "plan.yaml");
+
+  // First attempt.
+  const result = await piInvoke({ ...piOpts, prompt: userMessage });
 
   // Hard verification of the architectural invariant: design phase stdout
   // must contain zero factorio_action / factorio_read tool invocations.
+  // This check applies to the FIRST attempt (it's an architectural property,
+  // not a schema property). Retries also forbid these tools because they're
+  // not in the tool allowlist anyway.
   for (const pattern of FORBIDDEN_TOOL_PATTERNS) {
     if (pattern.test(result.stdout)) {
       throw new Error(
@@ -100,11 +135,57 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
     }
   }
 
-  const planPath = join(outDir, "plan.yaml");
-  const text = await readFile(planPath, "utf8").catch(() => null);
+  let text = await readFile(planPath, "utf8").catch(() => null);
+  let parsed = text ? parseYaml(text) : null;
+  let errors = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                      : ["plan.yaml not produced"];
+
+  // One retry with error feedback (parallel to probe.js). If schema fails,
+  // hand the model the validator's specific complaints + its previous output
+  // so it can correct rather than re-improvise from scratch.
+  if (errors.length) {
+    const previousYaml = text ?? "(no plan.yaml was written)";
+    const errorList = errors.map((e) => `  - ${e}`).join("\n");
+    const retryMessage = [
+      `Your previous Design phase output failed schema validation.`,
+      ``,
+      `Errors from the deterministic validator:`,
+      errorList,
+      ``,
+      `Your previous plan.yaml content (truncated to 4000 chars):`,
+      "```yaml",
+      previousYaml.slice(0, 4000),
+      "```",
+      ``,
+      `Re-emit a corrected plan.yaml at the bare relative path \`plan.yaml\``,
+      `(no absolute paths, no \`..\`, no subdirectories). The validator`,
+      `accepts EXACTLY these 5 top-level keys, no others:`,
+      ``,
+      `  epoch: ${epoch.id}`,
+      `  placements:`,
+      `    - id: <short string>`,
+      `      module: <one of ${(epoch.allowed_modules || []).join(", ") || "the allowed modules"}>`,
+      `      anchor: { x: <number>, y: <number> }`,
+      `      direction: <north|east|south|west>`,
+      `  connections: []`,
+      `  expected_throughput: <number>`,
+      `  why_not_replicate: <one-sentence string>`,
+      ``,
+      `Do NOT add: steps, entities, risks, success_criteria, kind, action,`,
+      `depends_on, formula, assert, version, starter_fuel, id (top-level),`,
+      `created, or any other key. You are emitting a placement spec, not a`,
+      `runbook.`,
+    ].join("\n");
+    console.log(`[design] schema validation failed; retrying with error feedback`);
+    await piInvoke({ ...piOpts, prompt: retryMessage });
+
+    text = await readFile(planPath, "utf8").catch(() => null);
+    parsed = text ? parseYaml(text) : null;
+    errors = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                    : ["plan.yaml not produced on retry"];
+  }
+
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);
-  const parsed = parseYaml(text);
-  const errors = validatePlan(parsed, epoch.allowed_modules);
   if (errors.length) {
     throw new Error(`design phase produced invalid plan.yaml:\n  ${errors.join("\n  ")}`);
   }

@@ -18,25 +18,44 @@ you cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
 - `lib/blueprints/*.json` — the blueprint that realises each module. You can
   read these to understand the entity layout and starter fuel requirements.
 
-## Required output
+## Output is schema-validated. Read this carefully.
 
-Write `plan.yaml` (and only `plan.yaml`) at the root of your working directory.
-Required fields (all four are mandatory — `dry-validate` will fail otherwise):
+`plan.yaml` is parsed and validated by `src/runner/design.js` immediately
+after you exit. The runner spawns you with cwd already set to your phase
+workdir; **use the bare relative path `plan.yaml`** when calling the `write`
+tool. Do not use absolute paths, do not use `../plan.yaml`, do not write
+into any subdirectory or parent directory — the validator reads exactly
+`<your-cwd>/plan.yaml` and nothing else.
 
-```yaml
-epoch: <epoch.id>
-placements:
-  - id: <unique short string>           # e.g. p0, p1
-    module: <module.id>
-    anchor: { x: <number>, y: <number> }
-    direction: <north|east|south|west>
-connections:                            # may be []
-  - from: { placement: <id>, port: <port name> }
-    to:   { placement: <id>, port: <port name> }
-    required_throughput: <number>       # items/s
-expected_throughput: <number>           # the producer-side rate the plan delivers for the target item
-why_not_replicate: <string>             # one sentence — why N modules instead of N copies of one
-```
+The validator checks **exactly these top-level keys** and **fails the entire
+epoch** if any are missing. Each placement is also schema-checked.
+
+| key                   | required | type                                                                                  |
+|-----------------------|----------|---------------------------------------------------------------------------------------|
+| `epoch`               | yes      | string — must equal the epoch id                                                      |
+| `placements`          | yes      | array of `{id, module, anchor: {x, y}, direction}` (one per module instance)          |
+| `connections`         | yes      | array (use `[]` if no inter-module wiring) of `{from, to, required_throughput}`       |
+| `expected_throughput` | yes      | number — items/s your plan delivers of the target item                                |
+| `why_not_replicate`   | yes      | string — one sentence justifying composition vs N copies of one module                |
+
+**You are NOT writing a project plan, a runbook, or a step list.** You are
+emitting a placement specification. The runner already knows how to walk,
+place blueprints, seed fuel, wait, and audit — those are not your concern.
+
+**Anti-patterns the validator and the next phases reject:**
+
+- Do **not** add top-level keys like `entities`, `steps`, `risks`,
+  `success_criteria`, `module`, `version`, `starter_fuel`, `anchor`, `id`.
+  They are not consumed and a plan that has them but is missing the four
+  required keys above will fail.
+- Do **not** describe individual blueprint entities under `placements[]`.
+  A `placement` is a **module instance**, not an entity. The blueprint
+  specifies the entities; you only pick which module to place and where.
+- `placements[].direction` must be one of `north`, `east`, `south`, `west`
+  (lowercase). Not `0/2/4/6`, not `N/E/S/W`.
+- `placements[].anchor.x` and `.y` must both be numbers (not strings).
+- `connections: []` is required even when there is only one placement.
+  Omitting it fails the epoch.
 
 ## Anchoring rules
 
@@ -54,13 +73,38 @@ module's local frame. You must:
 
 - `placements` and `connections` describe geometry.
 - `expected_throughput` is the rate this plan should deliver of the target
-  item. Compute it from the chosen modules' port throughputs, not by guessing.
+  item. Compute it from the chosen modules' port throughputs, not by
+  guessing.
 - `why_not_replicate` is the most important field when scaling beyond a
   single module. If you place 4 of the same module to multiply output, your
   reason must explain why this particular composition meets the target —
   not just "4× one module".
 
+## Reference: a valid `plan.yaml`
+
+The following is the literal shape the validator accepts. Match it.
+
+```yaml
+epoch: e1-first-coal
+
+placements:
+  - id: p0
+    module: coal-burner-cell
+    anchor: { x: -48, y: -85 }
+    direction: north
+
+connections: []
+
+expected_throughput: 0.18
+
+why_not_replicate: |
+  Single module exceeds the 0.10 coal/s target by 80%; no need for a second
+  cell. One placement keeps the plan minimal and avoids overlapping footprints.
+```
+
 ## Budget
 
 Aim for under 60 tool calls. Most of your time should be reading the lib
-files; the actual `plan.yaml` is short.
+files; the actual `plan.yaml` is short. Anything you discover that isn't a
+field above belongs in `why_not_replicate` as a sentence — not as extra
+top-level keys.
