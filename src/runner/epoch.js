@@ -111,72 +111,131 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
   const inputSave = resolve(config.rootDir, epoch.input_save);
   const outputSave = resolve(config.rootDir, epoch.output_save);
-  log(`[epoch ${epoch.id}] starting from save ${inputSave}`);
+  const maxAttempts = Math.max(1, Number(epoch.recovery_attempts) || 1);
+  log(`[epoch ${epoch.id}] starting from save ${inputSave}` + (maxAttempts > 1 ? ` (recovery_attempts=${maxAttempts})` : ""));
   await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runId}`);
   await mkdir(runDir, { recursive: true });
-  const stagedDir = join(runDir, "staged-modules");
 
+  // Probe runs once per run regardless of recovery_attempts. The world
+  // resets to input_save between attempts so the same probe output remains
+  // valid; the cache (probe-cache.js) makes this cheap even across runs.
   log(`[epoch ${epoch.id}] phase 1: probe`);
-  const probeResult = await runProbe({ config, epoch, outDir: join(runDir, "probe") });
-  log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}`);
-
-  log(`[epoch ${epoch.id}] phase 2: design`);
-  const designResult = await runDesign({
+  const probeResult = await runProbe({
     config,
     epoch,
-    state: probeResult.state,
-    probeDir: join(runDir, "probe"),
-    outDir: join(runDir, "design"),
-    stagedDir,
+    outDir: join(runDir, "probe"),
+    inputSavePath: inputSave,
   });
-  log(`[epoch ${epoch.id}] design ok — placements=${designResult.plan.placements.length}` +
-      (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
+  log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
-  log(`[epoch ${epoch.id}] phase 3: dry-validate`);
-  const modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
-  const dryResult = await runDryValidate({
-    plan: designResult.plan,
-    modules,
-    outDir: runDir,
-  });
-  if (!dryResult.ok) {
-    throw new Error(`dry-validate failed:\n  ${dryResult.errors.join("\n  ")}`);
+  // Recovery loop: design → dry-validate → execute → audit, with the
+  // world reset to input_save before each retry so each attempt starts
+  // from the same blank slate. previousAttempts is fed to design so the
+  // next LLM call sees a focused brief on what already failed.
+  const previousAttempts = [];
+  let winning = null;
+  let lastVerdict = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const isMulti = maxAttempts > 1;
+    const attemptDir = isMulti ? join(runDir, `attempt-${attempt}`) : runDir;
+    const designOut = isMulti ? join(attemptDir, "design") : join(runDir, "design");
+    const stagedDir = isMulti ? join(attemptDir, "staged-modules") : join(runDir, "staged-modules");
+    const executeOut = isMulti ? join(attemptDir, "execute") : join(runDir, "execute");
+    if (isMulti) await mkdir(attemptDir, { recursive: true });
+
+    if (attempt > 1) {
+      log(`[epoch ${epoch.id}] retry attempt ${attempt}/${maxAttempts} — resetting world to input_save`);
+      await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+    }
+
+    let designResult, modules, dryResult, exResult, verdict;
+    try {
+      log(`[epoch ${epoch.id}] attempt ${attempt}: design`);
+      designResult = await runDesign({
+        config,
+        epoch,
+        state: probeResult.state,
+        probeDir: join(runDir, "probe"),
+        outDir: designOut,
+        stagedDir,
+        previousAttempts,
+      });
+      log(`[epoch ${epoch.id}] attempt ${attempt}: design ok — placements=${designResult.plan.placements.length}` +
+          (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
+
+      log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate`);
+      modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
+      dryResult = await runDryValidate({
+        plan: designResult.plan,
+        modules,
+        outDir: attemptDir,
+      });
+      if (!dryResult.ok) throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
+      log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
+
+      log(`[epoch ${epoch.id}] attempt ${attempt}: execute`);
+      exResult = await runExecute({
+        config,
+        epoch,
+        plan: designResult.plan,
+        modules,
+        outDir: executeOut,
+        savePathOut: outputSave,
+      });
+      log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
+
+      log(`[epoch ${epoch.id}] attempt ${attempt}: audit`);
+      verdict = await runAudit({
+        config,
+        targetMetric: epoch.target_metric,
+        outDir: attemptDir,
+      });
+      log(`[epoch ${epoch.id}] attempt ${attempt}: audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
+      lastVerdict = verdict;
+
+      if (verdict.pass) {
+        winning = { designResult, modules, exResult, verdict, stagedDir };
+        break;
+      }
+      previousAttempts.push({
+        attempt,
+        plan: designResult.plan,
+        verdict,
+        authored: designResult.authored,
+      });
+    } catch (error) {
+      log(`[epoch ${epoch.id}] attempt ${attempt} failed before audit: ${error.message}`);
+      previousAttempts.push({
+        attempt,
+        plan: designResult?.plan,
+        authored: designResult?.authored,
+        error: error.message,
+      });
+      // If this was the last attempt and we never got a clean audit, bail.
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+    }
   }
-  log(`[epoch ${epoch.id}] dry-validate ok`);
 
-  log(`[epoch ${epoch.id}] phase 4: execute`);
-  const exResult = await runExecute({
-    config,
-    epoch,
-    plan: designResult.plan,
-    modules,
-    outDir: join(runDir, "execute"),
-    savePathOut: outputSave,
-  });
-  log(`[epoch ${epoch.id}] execute ok — save=${exResult.savePath}`);
+  if (!winning) {
+    log(`[epoch ${epoch.id}] all ${maxAttempts} attempts failed audit`);
+    if (lastVerdict) {
+      await writeDigest({ config, epoch, verdict: lastVerdict, runDir });
+    }
+    return { ok: false, verdict: lastVerdict, runDir, attempts: previousAttempts };
+  }
 
-  log(`[epoch ${epoch.id}] phase 5: audit`);
-  const verdict = await runAudit({
-    config,
-    targetMetric: epoch.target_metric,
-    outDir: runDir,
-  });
-  log(`[epoch ${epoch.id}] audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
-
-  // Promote any staged modules to lib/ on audit pass. On audit fail leave
-  // them in the run's staged-modules/ directory for inspection — lib/ stays
-  // clean of unverified artefacts.
-  if (verdict.pass && designResult.authored?.length) {
+  const { designResult, verdict, stagedDir } = winning;
+  if (designResult.authored?.length) {
     await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
-  } else if (designResult.authored?.length) {
-    log(`[epoch ${epoch.id}] audit failed — staged modules left in ${stagedDir} (not promoted)`);
   }
 
   await writeDigest({ config, epoch, verdict, runDir });
-  return { ok: verdict.pass, verdict, runDir };
+  return { ok: verdict.pass, verdict, runDir, attempts: previousAttempts.length + 1 };
 }
 
 async function promoteStagedModules({ config, authored, log, epochId }) {

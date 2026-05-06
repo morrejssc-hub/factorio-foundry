@@ -2,6 +2,7 @@ node_modules/
 plans/
 state/saves/
 state/digests/
+state/cache/
 runtime/
 *.log
 .DS_Store

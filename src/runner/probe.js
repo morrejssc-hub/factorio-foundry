@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 import { normalize, STATE_SCHEMA } from "./schema-norm.js";
+import { probeCacheKey, readProbeCache, writeProbeCache } from "./probe-cache.js";
 
 async function ensureSymlink(target, linkPath) {
   try {
@@ -44,9 +45,11 @@ function validateState(parsed) {
  * @param {object} args.config
  * @param {object} args.epoch       — parsed epoch yaml
  * @param {string} args.outDir      — plans/<run>/probe/ (will be created)
- * @returns {Promise<{stateYamlPath: string, state: object, raw: object}>}
+ * @param {string} [args.inputSavePath] — absolute path to the input save zip
+ *                  (for cache keying; if absent, cache is skipped entirely)
+ * @returns {Promise<{stateYamlPath: string, state: object, raw: object, cacheHit: boolean}>}
  */
-export async function runProbe({ config, epoch, outDir }) {
+export async function runProbe({ config, epoch, outDir, inputSavePath }) {
   await mkdir(outDir, { recursive: true });
   // Surface lib/probes as `lib/` inside the phase cwd so the prompt's path
   // hints (`lib/find-coal-patch.lua`) resolve through pi's read tool.
@@ -55,7 +58,45 @@ export async function runProbe({ config, epoch, outDir }) {
   // Stash the epoch definition so the model can read it via `read epoch.yaml`.
   await copyFile(epoch._path, join(outDir, "epoch.yaml"));
 
-  const systemPrompt = await readFile(resolve(config.rootDir, "prompts/probe.md"), "utf8");
+  const stateYamlPath = join(outDir, "state.yaml");
+  const probePromptPath = resolve(config.rootDir, "prompts/probe.md");
+  const probesDir = resolve(config.libDir, "probes");
+  const cacheDir = resolve(config.rootDir, "state/cache/probe");
+
+  // Cache lookup: key by (input save bytes, epoch.yaml bytes, probe.md
+  // bytes, all probe lua scripts bytes). A hit means we can skip the pi
+  // call entirely and reuse a previously-validated state.yaml. Misses fall
+  // through to the normal pi flow; on success the result is cached.
+  let cacheKey = null;
+  if (inputSavePath) {
+    cacheKey = await probeCacheKey({
+      inputSavePath,
+      epochYamlPath: epoch._path,
+      probePromptPath,
+      probesDir,
+    });
+    const hit = await readProbeCache(cacheDir, cacheKey);
+    if (hit) {
+      await writeFile(stateYamlPath, hit.stateYaml, "utf8");
+      const parsed = parseYaml(hit.stateYaml);
+      const validation = validateState(parsed);
+      // Re-validation is defensive: a cached entry written by a buggy build
+      // shouldn't be silently honored. If it fails today's validator, fall
+      // through to a fresh pi run.
+      if (!validation.errors.length) {
+        console.log(`[probe] cache hit (${cacheKey}) — skipping pi`);
+        return {
+          stateYamlPath,
+          state: validation.effective,
+          raw: { cached: true, meta: hit.meta },
+          cacheHit: true,
+        };
+      }
+      console.log(`[probe] cache hit (${cacheKey}) but stale (validator rejected); re-running pi`);
+    }
+  }
+
+  const systemPrompt = await readFile(probePromptPath, "utf8");
 
   const factorioServerExt = resolve(config.rootDir, ".pi/extensions/factorio-server/index.ts");
   const factorioApiDocsExt = resolve(config.rootDir, ".pi/extensions/factorio-api-docs/index.ts");
@@ -78,8 +119,6 @@ export async function runProbe({ config, epoch, outDir }) {
     onStdout: (line) => console.log(`[probe pi] ${line}`),
     onStderr: (line) => process.stderr.write(`[probe pi err] ${line}\n`),
   };
-
-  const stateYamlPath = join(outDir, "state.yaml");
 
   // First attempt.
   const result = await piInvoke({ ...piOpts, prompt: userMessage });
@@ -135,5 +174,23 @@ export async function runProbe({ config, epoch, outDir }) {
   if (errors.length) {
     throw new Error(`probe phase produced invalid state.yaml:\n  ${errors.join("\n  ")}`);
   }
-  return { stateYamlPath, state: parsed, raw: result };
+
+  // Persist a successful probe to cache so subsequent epoch runs (or a
+  // retry within this run) can skip the pi call. The cache write is keyed
+  // on the same inputs as the lookup; we do this AFTER schema validation
+  // so a buggy partial output never poisons the cache.
+  if (cacheKey) {
+    try {
+      await writeProbeCache(cacheDir, cacheKey, text, {
+        epoch_id: epoch.id,
+        input_save: inputSavePath,
+        tick: parsed.tick,
+      });
+      console.log(`[probe] cached state.yaml under key ${cacheKey}`);
+    } catch (error) {
+      console.log(`[probe] cache write failed (non-fatal): ${error.message}`);
+    }
+  }
+
+  return { stateYamlPath, state: parsed, raw: result, cacheHit: false };
 }

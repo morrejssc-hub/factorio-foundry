@@ -135,9 +135,13 @@ async function validateStagedModules(stagedDir, expectedIds) {
  * @param {string} args.probeDir       — plans/<run>/probe/ (state.yaml lives here)
  * @param {string} args.outDir         — plans/<run>/design/
  * @param {string} [args.stagedDir]    — plans/<run>/staged-modules/ (created if epoch.allow_module_creation)
+ * @param {Array<object>} [args.previousAttempts] — prior failed attempts in this run.
+ *                  Each entry: {attempt, plan?, verdict?, authored?, error?}.
+ *                  Used by the recovery loop to brief the LLM on what already
+ *                  failed; absent on the first attempt.
  * @returns {Promise<{planPath: string, plan: object, raw: object, authored: object[]}>}
  */
-export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir }) {
+export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir, previousAttempts = [] }) {
   await mkdir(outDir, { recursive: true });
   await copyFile(join(probeDir, "state.yaml"), join(outDir, "state.yaml"));
   await copyFile(epoch._path, join(outDir, "epoch.yaml"));
@@ -233,6 +237,50 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `Read state.yaml for world coordinates and lib/modules/ for module`,
     `footprints, then write plan.yaml and exit.`,
   );
+  if (previousAttempts.length > 0) {
+    userMessageLines.push(
+      ``,
+      `--- PRIOR FAILED ATTEMPTS IN THIS RUN ---`,
+      `This is recovery attempt ${previousAttempts.length + 1}. Earlier attempts`,
+      `produced output that audit (or a phase before it) rejected. Use these`,
+      `failures as constraints — do NOT repeat the same anchor / module / `,
+      `geometry that already failed.`,
+      ``,
+    );
+    for (const a of previousAttempts) {
+      userMessageLines.push(`Attempt ${a.attempt}:`);
+      if (a.error) {
+        userMessageLines.push(`  failed before audit with: ${a.error}`);
+      }
+      if (a.plan) {
+        const placements = (a.plan.placements || []).map((p) =>
+          `${p.module}@(${p.anchor?.x},${p.anchor?.y}) dir=${p.direction}`).join("; ");
+        userMessageLines.push(`  plan placements: ${placements}`);
+      }
+      if (a.verdict) {
+        userMessageLines.push(
+          `  audit: pass=${a.verdict.pass} measured=${a.verdict.measured.toFixed?.(4) ?? a.verdict.measured}` +
+          ` threshold=${a.verdict.threshold} item=${a.verdict.item}` +
+          ` produced_delta=${a.verdict.produced_delta} window_s=${a.verdict.seconds_actual?.toFixed?.(1) ?? "?"}`,
+        );
+      }
+      if (a.authored && a.authored.length) {
+        userMessageLines.push(`  authored modules: ${a.authored.map((x) => x.id).join(", ")}`);
+      }
+    }
+    userMessageLines.push(
+      ``,
+      `Make a substantively different choice on this attempt. Common levers:`,
+      `  - different anchor (further from previous, or facing a different`,
+      `    direction so footprint covers more of the resource patch)`,
+      `  - different module from allowed_modules`,
+      `  - if authoring: revisit blueprint geometry — drill drop tiles must`,
+      `    land on belts (or directly into a furnace), inserter pickup tiles`,
+      `    must overlap a belt or chest, fuel chains must close`,
+      ``,
+      `--- END PRIOR ATTEMPTS ---`,
+    );
+  }
   const userMessage = userMessageLines.join("\n");
 
   const piOpts = {
