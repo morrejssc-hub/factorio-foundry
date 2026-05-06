@@ -1,0 +1,38 @@
+# iron-smelt-line
+#
+# Burner mining drill on an iron-ore patch drops ore directly into an adjacent
+# 2x2 stone furnace; an inserter east of the furnace lifts iron-plate output
+# into a chest. Externally fuelled — coal is pre-loaded into drill, furnace,
+# and inserter at placement time. Steady-state output is drill-bottlenecked
+# (~0.25 ore/s × 1 plate/ore = ~0.25 plate/s before stalls).
+id: iron-smelt-line
+version: 1
+
+inputs: []
+outputs:
+  - { name: iron_plate_chest, side: east, rel_pos: [4.5, 0.5], throughput: 0.20, item: iron-plate, kind: inventory }
+
+power: { kind: burner, fuel: coal, self_sufficient: false }
+
+# Anchor-relative bounding box. Drill 2x2 at (0,0) covers tiles -1..0;
+# furnace 2x2 at (2,0) covers 1..2; inserter+chest 1x1 at row 0 cover col 3..4.
+# Y range is -1..1 (drill/furnace top edge at -1, inserter/chest at row 0).
+footprint:
+  min: [-1.0, -1.0]
+  max: [5.0, 1.0]
+
+preconditions:
+  - kind: resource_patch
+    resource: iron-ore
+    min_tiles: 4
+    description: "drill 2x2 footprint must overlap an iron-ore patch covering at least the drill area"
+
+realization:
+  blueprint: lib/blueprints/iron-smelt-line.json
+  starter_fuel:
+    - { item: coal, count: 20 }   # 10 drill + 5 furnace + 5 inserter; pre-loaded by blueprint fuel[]
+
+audits:
+  - id: iron-smelt-line-throughput
+    script: lib/audits/throughput-window.lua
+    params: { item: iron-plate, min_rate_per_s: 0.05, window_ticks: 3600 }

@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "name": "iron_smelt_line_v1",
+  "description": "Burner mining drill on an iron-ore patch drops ore directly into an adjacent stone furnace; an inserter east of the furnace lifts iron-plate output into a chest. Externally fuelled via pre-seeded coal stacks (not self-sustaining beyond the initial fuel load).",
+  "anchor": "burner-mining-drill center; worker should place it on an iron-ore patch",
+  "entities": [
+    {
+      "key": "drill",
+      "item": "burner-mining-drill",
+      "dx": 0,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "furnace",
+      "item": "stone-furnace",
+      "dx": 2,
+      "dy": 0,
+      "direction": "north"
+    },
+    {
+      "key": "output_inserter",
+      "item": "burner-inserter",
+      "dx": 3.5,
+      "dy": 0.5,
+      "direction": "west"
+    },
+    {
+      "key": "iron_chest",
+      "item": "iron-chest",
+      "dx": 4.5,
+      "dy": 0.5,
+      "direction": "north"
+    }
+  ],
+  "fuel": [
+    {
+      "target": "drill",
+      "item": "coal",
+      "count": 10
+    },
+    {
+      "target": "furnace",
+      "item": "coal",
+      "count": 5
+    },
+    {
+      "target": "output_inserter",
+      "item": "coal",
+      "count": 5
+    }
+  ],
+  "ports": {
+    "iron_plate_output_chest": {
+      "entity": "iron_chest",
+      "kind": "inventory",
+      "item": "iron-plate"
+    }
+  },
+  "assertions": [
+    "worker_selected_anchor_has_iron_ore_context",
+    "drill_drops_ore_directly_into_furnace",
+    "output_inserter_moves_iron_plate_to_chest"
+  ]
+}

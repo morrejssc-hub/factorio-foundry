@@ -51,10 +51,20 @@ epoch** if any are missing or wrong-typed:
 
 ## How to find resource patches
 
-Run `lib/find-coal-patch.lua` via `factorio_read action=query_script
-script=lib/find-coal-patch.lua params={center_x, center_y, radius}` — this
-returns clusters of coal tiles. Pick a sensible center (try worker position
-first; if no patches found, try (0,0)).
+Run `lib/find-resource-patch.lua` via `factorio_read action=query_script
+script=lib/find-resource-patch.lua params={center_x, center_y, radius,
+resource}` — this returns clusters of tiles for the named resource. The
+`resource` param defaults to `"coal"`; pass `resource: "iron-ore"` for iron,
+`resource: "copper-ore"` for copper, `resource: "stone"` for stone, etc. Pick
+a sensible center (try worker position first; if no patches found, try (0,0)).
+
+When the epoch goal mentions iron, run the script twice — once with default
+`resource` (coal) and once with `resource: "iron-ore"` — so both
+`coal_patches` and `iron_patches` in `state.yaml` reflect actual on-map data.
+
+The older `lib/find-coal-patch.lua` is still present as a coal-only shim, but
+prefer the generalized script above so iron/copper/etc. probes use the same
+code path.
 
 ## Reference: a valid `state.yaml`
 

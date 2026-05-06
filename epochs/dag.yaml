@@ -1,8 +1,11 @@
 id: factorio-foundry-mvp
 description: |
   MVP epoch chain. Bootstrap creates the initial save with a starter inventory;
-  e1 places one coal-burner-cell module and audits throughput.
+  e1 places one coal-burner-cell module and audits throughput; e2 places one
+  iron-smelt-line module on top of the e1 save and audits iron-plate output.
 nodes:
   - id: e0-bootstrap
   - id: e1-first-coal
     depends_on: [e0-bootstrap]
+  - id: e2-first-iron
+    depends_on: [e1-first-coal]
