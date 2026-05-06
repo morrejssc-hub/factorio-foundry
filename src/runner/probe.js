@@ -6,9 +6,7 @@ import { mkdir, readFile, writeFile, symlink, lstat, copyFile } from "node:fs/pr
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
-
-const REQUIRED_FIELDS = ["tick", "worker", "inventory_summary", "coal_patches", "iron_patches"];
-const STATE_WRAPPER_KEYS = ["probe", "state", "result", "data", "output"];
+import { normalize, STATE_SCHEMA } from "./schema-norm.js";
 
 async function ensureSymlink(target, linkPath) {
   try {
@@ -20,43 +18,25 @@ async function ensureSymlink(target, linkPath) {
   await symlink(target, linkPath);
 }
 
-function validateStateShape(parsed) {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return ["state.yaml must be a YAML mapping at the top level"];
-  }
-  const errors = [];
-  for (const f of REQUIRED_FIELDS) {
-    if (!(f in parsed)) errors.push(`missing field: ${f}`);
-  }
-  if (parsed.tick !== undefined && !Number.isFinite(parsed.tick)) errors.push("tick must be a number");
-  if (parsed.worker && (!parsed.worker.position
-      || !Number.isFinite(parsed.worker.position.x)
-      || !Number.isFinite(parsed.worker.position.y))) {
-    errors.push("worker.position must be {x,y}");
-  }
-  return errors;
-}
-
-// Auto-unwrap rescue: if the LLM produced a single namespacing dict like
-// `probe: { tick, worker, ... }` instead of a flat schema, hoist that inner
-// object so downstream code sees what it expects. Returns { effective, errors,
-// unwrappedFrom? }. Never throws; only used to absorb Pattern B drift seen in
-// e1-run-8 / e2-run-1's first attempt.
+// validateState runs the unified normalizer against STATE_SCHEMA, then layers
+// type checks on the required fields. The normalizer absorbs Pattern B/C
+// drift (wrapper-nesting, surplus top-level keys) without forcing a retry;
+// only Pattern A (required fields actually missing) and type mismatches
+// produce errors that trigger the retry path.
 function validateState(parsed) {
-  const direct = validateStateShape(parsed);
-  if (direct.length === 0) return { effective: parsed, errors: [] };
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    for (const wrapper of STATE_WRAPPER_KEYS) {
-      const inner = parsed[wrapper];
-      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-        const innerErrors = validateStateShape(inner);
-        if (innerErrors.length === 0) {
-          return { effective: inner, errors: [], unwrappedFrom: wrapper };
-        }
-      }
+  const { normalized, errors, warnings, unwrapped } = normalize(parsed, STATE_SCHEMA);
+  const allErrors = [...errors];
+  if (normalized) {
+    if (normalized.tick !== undefined && !Number.isFinite(normalized.tick)) {
+      allErrors.push("tick must be a number");
+    }
+    if (normalized.worker && (!normalized.worker.position
+        || !Number.isFinite(normalized.worker.position.x)
+        || !Number.isFinite(normalized.worker.position.y))) {
+      allErrors.push("worker.position must be {x,y}");
     }
   }
-  return { effective: parsed, errors: direct };
+  return { effective: normalized, errors: allErrors, warnings, unwrapped };
 }
 
 /**
@@ -106,12 +86,10 @@ export async function runProbe({ config, epoch, outDir }) {
 
   let text = await readFile(stateYamlPath, "utf8").catch(() => null);
   let parsed = text ? parseYaml(text) : null;
-  let validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced"] };
+  let validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced"], warnings: [], unwrapped: false };
   let errors = validation.errors;
-  if (validation.unwrappedFrom) {
-    console.log(`[probe] auto-unwrapped state from top-level "${validation.unwrappedFrom}:" key`);
-    parsed = validation.effective;
-  }
+  for (const w of validation.warnings || []) console.log(`[probe normalize] ${w}`);
+  if (validation.effective) parsed = validation.effective;
 
   // One retry: if the first attempt failed schema (or didn't write the file),
   // feed the previous attempt's content + validator errors back to a fresh
@@ -145,12 +123,10 @@ export async function runProbe({ config, epoch, outDir }) {
 
     text = await readFile(stateYamlPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
-    validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced on retry"] };
+    validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced on retry"], warnings: [], unwrapped: false };
     errors = validation.errors;
-    if (validation.unwrappedFrom) {
-      console.log(`[probe] auto-unwrapped state from top-level "${validation.unwrappedFrom}:" key (retry)`);
-      parsed = validation.effective;
-    }
+    for (const w of validation.warnings || []) console.log(`[probe normalize] ${w} (retry)`);
+    if (validation.effective) parsed = validation.effective;
   }
 
   if (!text) {

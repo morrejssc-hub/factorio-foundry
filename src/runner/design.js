@@ -9,15 +9,13 @@ import { mkdir, readFile, copyFile, symlink, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
+import { normalize, PLAN_SCHEMA } from "./schema-norm.js";
 
 const FORBIDDEN_TOOL_PATTERNS = [
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_action/i,
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_read/i,
   /\bfactorio_action\s*\(/,
 ];
-
-const PLAN_REQUIRED_FIELDS = ["epoch", "placements", "connections", "expected_throughput", "why_not_replicate"];
-const PLAN_WRAPPER_KEYS = ["plan", "design", "result", "data", "output"];
 
 async function ensureSymlink(target, linkPath) {
   try {
@@ -29,52 +27,33 @@ async function ensureSymlink(target, linkPath) {
   await symlink(target, linkPath);
 }
 
-function validatePlanShape(parsed, allowedModules) {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return ["plan.yaml must be a YAML mapping at the top level"];
-  }
-  const errors = [];
-  for (const f of PLAN_REQUIRED_FIELDS) {
-    if (!(f in parsed)) errors.push(`missing field: ${f}`);
-  }
-  if (Array.isArray(parsed.placements)) {
-    for (const [i, p] of parsed.placements.entries()) {
-      if (!p.id) errors.push(`placements[${i}].id missing`);
-      if (!p.module) errors.push(`placements[${i}].module missing`);
+// validatePlan runs the unified normalizer against PLAN_SCHEMA, then layers
+// per-placement type checks (id/module/anchor/direction). The normalizer
+// absorbs Pattern B/C drift; only Pattern A (required fields actually
+// missing) triggers retry.
+function validatePlan(parsed, allowedModules) {
+  const { normalized, errors, warnings, unwrapped } = normalize(parsed, PLAN_SCHEMA);
+  const allErrors = [...errors];
+  if (normalized && Array.isArray(normalized.placements)) {
+    for (const [i, p] of normalized.placements.entries()) {
+      if (!p || typeof p !== "object") {
+        allErrors.push(`placements[${i}] must be a mapping`);
+        continue;
+      }
+      if (!p.id) allErrors.push(`placements[${i}].id missing`);
+      if (!p.module) allErrors.push(`placements[${i}].module missing`);
       else if (allowedModules && !allowedModules.includes(p.module)) {
-        errors.push(`placements[${i}].module '${p.module}' not in allowed_modules`);
+        allErrors.push(`placements[${i}].module '${p.module}' not in allowed_modules`);
       }
       if (!p.anchor || !Number.isFinite(p.anchor.x) || !Number.isFinite(p.anchor.y)) {
-        errors.push(`placements[${i}].anchor must be {x,y}`);
+        allErrors.push(`placements[${i}].anchor must be {x,y}`);
       }
       if (!["north", "east", "south", "west"].includes(p.direction)) {
-        errors.push(`placements[${i}].direction must be one of north/east/south/west`);
+        allErrors.push(`placements[${i}].direction must be one of north/east/south/west`);
       }
     }
   }
-  return errors;
-}
-
-// Auto-unwrap rescue, parallel to probe.js. Absorbs Pattern B drift where the
-// LLM nests the plan inside a single namespacing dict like `plan: {...}` or
-// `design: {...}` instead of writing a flat schema. Pattern A (wrong shape
-// entirely — `steps`/`entities`/`risks` and no placements) is NOT rescued
-// here; that requires retry with explicit error feedback.
-function validatePlan(parsed, allowedModules) {
-  const direct = validatePlanShape(parsed, allowedModules);
-  if (direct.length === 0) return { effective: parsed, errors: [] };
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    for (const wrapper of PLAN_WRAPPER_KEYS) {
-      const inner = parsed[wrapper];
-      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-        const innerErrors = validatePlanShape(inner, allowedModules);
-        if (innerErrors.length === 0) {
-          return { effective: inner, errors: [], unwrappedFrom: wrapper };
-        }
-      }
-    }
-  }
-  return { effective: parsed, errors: direct };
+  return { effective: normalized, errors: allErrors, warnings, unwrapped };
 }
 
 /**
@@ -166,12 +145,10 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
   let text = await readFile(planPath, "utf8").catch(() => null);
   let parsed = text ? parseYaml(text) : null;
   let validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                          : { effective: null, errors: ["plan.yaml not produced"] };
+                          : { effective: null, errors: ["plan.yaml not produced"], warnings: [], unwrapped: false };
   let errors = validation.errors;
-  if (validation.unwrappedFrom) {
-    console.log(`[design] auto-unwrapped plan from top-level "${validation.unwrappedFrom}:" key`);
-    parsed = validation.effective;
-  }
+  for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
+  if (validation.effective) parsed = validation.effective;
 
   // One retry with error feedback (parallel to probe.js). If schema fails,
   // hand the model the validator's specific complaints + its previous output
@@ -215,12 +192,10 @@ export async function runDesign({ config, epoch, state, probeDir, outDir }) {
     text = await readFile(planPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
     validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                        : { effective: null, errors: ["plan.yaml not produced on retry"] };
+                        : { effective: null, errors: ["plan.yaml not produced on retry"], warnings: [], unwrapped: false };
     errors = validation.errors;
-    if (validation.unwrappedFrom) {
-      console.log(`[design] auto-unwrapped plan from top-level "${validation.unwrappedFrom}:" key (retry)`);
-      parsed = validation.effective;
-    }
+    for (const w of validation.warnings || []) console.log(`[design normalize] ${w} (retry)`);
+    if (validation.effective) parsed = validation.effective;
   }
 
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);
