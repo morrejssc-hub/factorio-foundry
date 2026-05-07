@@ -650,6 +650,7 @@ export class FactorioServer {
     await this.ensureSave();
     this.logStream = createWriteStream(this.currentLogPath, { flags: "a" });
     const args = [
+      ...(this.config.configFile ? ["-c", this.config.configFile] : []),
       "--start-server",
       this.savePath(),
       "--server-settings",

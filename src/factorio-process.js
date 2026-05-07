@@ -56,6 +56,8 @@ async function ensureWorkspace(config) {
   );
 }
 
+export { ensureWorkspace };
+
 export async function bootFactorioService({ check = false } = {}) {
   const config = loadConfig();
   await ensureWorkspace(config);

@@ -15,6 +15,8 @@ import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
 import { runExecute } from "./execute.js";
 import { runAudit } from "./audit.js";
+import { runBenchmarkAudit } from "./benchmark-audit.js";
+import { InstancePool } from "./instance-pool.js";
 import { writeSummary } from "./run-summary.js";
 import {
   candidateId, candidateDir, epochSaveDir, runSavePath,
@@ -207,12 +209,20 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       });
       log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
 
-      log(`[epoch ${epoch.id}] attempt ${attempt}: audit`);
-      verdict = await runAudit({
-        config,
-        targetMetric: epoch.target_metric,
-        outDir: candDir,
-      });
+      log(`[epoch ${epoch.id}] attempt ${attempt}: audit${config.benchmarkAudit ? " (benchmark)" : ""}`);
+      verdict = config.benchmarkAudit
+        ? await runBenchmarkAudit({
+            config,
+            factorio,
+            targetMetric: epoch.target_metric,
+            outDir: candDir,
+            candidateSavePath,
+          })
+        : await runAudit({
+            config,
+            targetMetric: epoch.target_metric,
+            outDir: candDir,
+          });
       log(`[epoch ${epoch.id}] attempt ${attempt}: audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
       lastVerdict = verdict;
 
@@ -463,9 +473,242 @@ async function writeDigest({ config, epoch, verdict, runDir }) {
   await writeFile(digestPath, lines.join("\n"), "utf8");
 }
 
+// ---------------------------------------------------------------------------
+// Parallel composition epoch — N independent designs evaluated simultaneously.
+// Design phases run in parallel (LLM-only, no Factorio interaction).
+// Execute+audit phases run concurrently on an N-slot InstancePool.
+// ---------------------------------------------------------------------------
+
+async function runOneDesign(idx, { config, epoch, probeResult, runDir, log }) {
+  const cid = candidateId(idx);
+  const candDir = candidateDir(runDir, cid);
+  await mkdir(candDir, { recursive: true });
+  const designOut = join(candDir, "design");
+  const stagedDir = join(candDir, "staged-modules");
+
+  log(`[epoch ${epoch.id}] [${cid}] design`);
+  let designResult, modules, dryResult;
+  let designError = null;
+  try {
+    designResult = await runDesign({
+      config,
+      epoch,
+      state: probeResult.state,
+      probeDir: join(runDir, "probe"),
+      outDir: designOut,
+      stagedDir,
+      previousAttempts: [],
+      historyPath: null,
+    });
+    log(`[epoch ${epoch.id}] [${cid}] design ok — placements=${designResult.plan.placements.length}`);
+
+    modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
+    dryResult = await runDryValidate({ plan: designResult.plan, modules, outDir: candDir });
+    if (!dryResult.ok) throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
+    log(`[epoch ${epoch.id}] [${cid}] dry-validate ok`);
+  } catch (err) {
+    designError = err.message;
+    log(`[epoch ${epoch.id}] [${cid}] design/dry-validate failed: ${err.message}`);
+  }
+  return { idx, cid, candDir, designOut, stagedDir, designResult, modules, dryResult, designError };
+}
+
+async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log }) {
+  const { idx, cid, candDir, designOut, stagedDir, designResult, modules, designError } = design;
+  const candidateSavePath = runSavePath(saveDir, runTs, cid);
+  const executeOut = join(candDir, "execute");
+  const record = {
+    attempt: idx + 1,
+    candidate: cid,
+    candidateDir: candDir,
+    designOut,
+    executeOut,
+    candidateSavePath,
+    placements: designResult?.plan?.placements?.length ?? null,
+    authored: designResult?.authored?.map((a) => a.id) ?? [],
+    dry_validate: design.dryResult ? { ok: design.dryResult.ok, errors: design.dryResult.errors ?? [] } : null,
+    execute: null,
+    audit: null,
+    error: designError,
+  };
+  if (designError) return record;
+
+  const slot = await pool.acquire();
+  try {
+    log(`[epoch ${epoch.id}] [${cid}] execute (slot ${slot.index})`);
+    const exResult = await runExecute({
+      config: slot.config,
+      epoch,
+      plan: designResult.plan,
+      modules,
+      outDir: executeOut,
+      savePathOut: candidateSavePath,
+    });
+    record.execute = { ok: exResult.ok ?? true, save_path: exResult.savePath };
+    log(`[epoch ${epoch.id}] [${cid}] execute ok — save=${exResult.savePath}`);
+
+    log(`[epoch ${epoch.id}] [${cid}] audit (benchmark)`);
+    const verdict = await runBenchmarkAudit({
+      config: slot.config,
+      factorio: slot.factorio,
+      targetMetric: epoch.target_metric,
+      outDir: candDir,
+      candidateSavePath,
+    });
+    record.audit = {
+      pass: verdict.pass,
+      measured: verdict.measured,
+      threshold: verdict.threshold,
+      item: verdict.item,
+      seconds_actual: verdict.seconds_actual,
+      produced_delta: verdict.produced_delta,
+      window_ticks_actual: verdict.window_ticks_actual,
+      timestamp: verdict.timestamp,
+    };
+    log(`[epoch ${epoch.id}] [${cid}] audit verdict: pass=${verdict.pass} measured=${verdict.measured}`);
+  } catch (err) {
+    record.error = err.message;
+    log(`[epoch ${epoch.id}] [${cid}] execute/audit failed: ${err.message}`);
+  } finally {
+    pool.release(slot);
+  }
+  return record;
+}
+
+async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
+  if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
+  const inputSave = resolveInputSave(config, epoch.input_save);
+  const n = config.parallelCandidates;
+  log(`[epoch ${epoch.id}] parallel mode: ${n} candidates, benchmark audit`);
+
+  const runTs = new Date().toISOString().replace(/[:.]/g, "-");
+  const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
+  await mkdir(runDir, { recursive: true });
+  const saveDir = epochSaveDir(config, epoch.id);
+  await mkdir(saveDir, { recursive: true });
+  const winnerPath = winnerSavePath(saveDir);
+
+  // Probe: single instance (the factorio passed in from run-epoch.js).
+  log(`[epoch ${epoch.id}] phase 1: probe`);
+  await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+  const probeResult = await runProbe({
+    config,
+    epoch,
+    outDir: join(runDir, "probe"),
+    inputSavePath: inputSave,
+  });
+  log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
+
+  // Stop probe instance — pool manages everything from here.
+  await factorio.stop();
+
+  // Parallel design + dry-validate (no live Factorio needed).
+  log(`[epoch ${epoch.id}] launching ${n} parallel designs…`);
+  const designs = await Promise.all(
+    Array.from({ length: n }, (_, i) => runOneDesign(i, { config, epoch, probeResult, runDir, log })),
+  );
+
+  // Initialize pool — N instances loaded from inputSave.
+  const pool = new InstancePool(config, n);
+  log(`[epoch ${epoch.id}] initializing ${n}-slot instance pool…`);
+  await pool.init(inputSave);
+
+  // Parallel execute + benchmark audit.
+  log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
+  const attemptRecords = await Promise.all(
+    designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log })),
+  );
+
+  await pool.shutdown();
+
+  const selection = pickWinner(attemptRecords, epoch.optimize);
+  const winningRecord = attemptRecords.find((r) => r.audit?.pass);
+
+  const historyEntries = designs.map((d) => ({
+    attempt: d.idx + 1,
+    placements: (d.designResult?.plan?.placements || []).map((p) => ({
+      module: p.module, anchor: p.anchor, direction: p.direction,
+    })),
+    expected_throughput: d.designResult?.plan?.expected_throughput ?? null,
+    error: d.designError ?? null,
+  }));
+  await writeFile(join(runDir, "designer-history.yaml"), stringifyYaml({ attempts: historyEntries }), "utf8");
+
+  if (winningRecord) {
+    await promoteWinner(winningRecord.candidateSavePath, winnerPath);
+    log(`[epoch ${epoch.id}] winner → ${winningRecord.candidate} promoted to ${winnerPath}`);
+
+    // Promote staged modules from winning candidate's design.
+    const winDesign = designs.find((d) => d.idx === winningRecord.attempt - 1);
+    if (winDesign?.designResult?.authored?.length) {
+      await promoteStagedModules({
+        config,
+        authored: winDesign.designResult.authored,
+        log,
+        epochId: epoch.id,
+      });
+    }
+
+    const winVerdict = (() => {
+      const r = winningRecord.audit;
+      return r ? { pass: r.pass, item: r.item, measured: r.measured, threshold: r.threshold,
+        window_ticks_actual: r.window_ticks_actual ?? null, timestamp: new Date().toISOString() } : null;
+    })();
+    if (winVerdict) await writeDigest({ config, epoch, verdict: winVerdict, runDir });
+
+    await writeManifest(runDir, {
+      epoch: epoch.id,
+      run_ts: runTs,
+      winner_candidate: winningRecord.candidate,
+      winner_save: winnerPath,
+      winner_evidence: selection,
+      candidates: attemptRecords.map((r) => ({
+        candidate: r.candidate,
+        save: r.candidateSavePath,
+        audit: r.audit,
+        error: r.error ?? null,
+      })),
+    });
+  } else {
+    log(`[epoch ${epoch.id}] all ${n} parallel candidates failed`);
+  }
+
+  await writeRunMeta({
+    runDir, epoch,
+    ok: !!winningRecord,
+    inputSave,
+    outputSave: winnerPath,
+    maxAttempts: n,
+    actualAttempts: n,
+    probeCacheHit: !!probeResult.cacheHit,
+    attemptRecords,
+    lastVerdict: winningRecord?.audit ?? null,
+  });
+
+  try {
+    const { markdownPath } = await writeSummary(runDir);
+    log(`[epoch ${epoch.id}] summary → ${markdownPath}`);
+  } catch (err) {
+    log(`[epoch ${epoch.id}] summary write failed (non-fatal): ${err.message}`);
+  }
+
+  return {
+    ok: !!winningRecord,
+    verdict: winningRecord?.audit ?? null,
+    runDir,
+    attempts: n,
+    attemptsDetail: attemptRecords,
+  };
+}
+
 export async function runEpoch({ config, factorio, epoch }) {
   const log = (msg) => console.log(msg);
   if (epoch.kind === "bootstrap") return runBootstrapEpoch({ config, factorio, epoch, log });
-  if (epoch.kind === "composition") return runCompositionEpoch({ config, factorio, epoch, log });
+  if (epoch.kind === "composition") {
+    if (config.parallelCandidates > 1) {
+      return runParallelCompositionEpoch({ config, factorio, epoch, log });
+    }
+    return runCompositionEpoch({ config, factorio, epoch, log });
+  }
   throw new Error(`unknown epoch.kind: ${epoch.kind}`);
 }
