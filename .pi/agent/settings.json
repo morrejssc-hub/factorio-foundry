@@ -1,0 +1,6 @@
+{
+  "defaultProvider": "百炼 coding-plan",
+  "defaultModel": "qwen3.6-plus",
+  "defaultThinkingLevel": "high",
+  "packages": ["npm:pi-bailian-models"]
+}

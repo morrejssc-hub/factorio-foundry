@@ -36,7 +36,7 @@ import { join, resolve } from "node:path";
  * @param {string} [opts.systemPrompt]  — appended via temp file (--append-system-prompt @file)
  * @param {string[]} [opts.tools]       — `--tools a,b,c` allowlist
  * @param {string[]} [opts.extensions]  — absolute paths, each as `-e <path>`
- * @param {boolean} [opts.noExtensions] — `--no-extensions` (default true; explicit -e still loaded)
+ * @param {boolean} [opts.noExtensions] — `--no-extensions` (default false; auto-discovery is required so the parent `.pi/agent/settings.json` can register `packages` like the bailian model router. Pass true only for tests that intentionally isolate pi from project config.)
  * @param {boolean} [opts.noBuiltinTools] — `--no-builtin-tools`
  * @param {boolean} [opts.noContextFiles] — `--no-context-files` (default true; we drive prompts ourselves)
  * @param {boolean} [opts.noSkills]     — `--no-skills` (default true)
@@ -59,7 +59,7 @@ export async function piInvoke(opts) {
     systemPrompt,
     tools,
     extensions = [],
-    noExtensions = true,
+    noExtensions = false,
     noBuiltinTools = false,
     noContextFiles = true,
     noSkills = true,
@@ -82,21 +82,18 @@ export async function piInvoke(opts) {
   if (noContextFiles) args.push("--no-context-files");
   if (noSkills) args.push("--no-skills");
   if (noBuiltinTools) args.push("--no-builtin-tools");
-  // Per-phase explicit extensions (factorio tools, etc.).
+  // Per-phase explicit extensions (factorio tools, etc.). These are required
+  // because pi only auto-discovers `.pi/extensions/` from cwd, and runner
+  // phases use cwd=plans/<run>/<phase>/ which doesn't have one. Provider
+  // routers like bailian come from `packages` in `.pi/agent/settings.json`,
+  // which IS walked up from cwd.
   for (const ext of extensions) args.push("-e", resolve(ext));
-  // FOUNDRY_PI_EXTENSIONS lets the operator inject extra extensions (e.g.
-  // model-router extensions like pi-bailian-models) into every phase
-  // without re-enabling pi's full extension auto-discovery. Comma-separated
-  // absolute paths.
-  const extraExt = (process.env.FOUNDRY_PI_EXTENSIONS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const ext of extraExt) args.push("-e", resolve(ext));
   if (tools && tools.length) args.push("--tools", tools.join(","));
   // FOUNDRY_PI_MODEL / FOUNDRY_PI_PROVIDER let an operator pin the LLM for
   // every phase from one place (e.g. `FOUNDRY_PI_MODEL=glm-5 npm run epoch
-  // e1-first-coal`). Per-call opts.{provider,model} still win when set.
+  // e1-first-coal`). Per-call opts.{provider,model} still win when set. The
+  // foundry-local `.pi/agent/settings.json` is the normal source of truth;
+  // these env vars are an override channel.
   const effectiveProvider = provider ?? process.env.FOUNDRY_PI_PROVIDER;
   const effectiveModel = model ?? process.env.FOUNDRY_PI_MODEL;
   if (effectiveProvider) args.push("--provider", effectiveProvider);
