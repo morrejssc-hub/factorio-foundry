@@ -9,8 +9,11 @@ description: |
   high-but-reachable threshold to exercise the retry loop (audit-fail →
   re-design with prior-attempt feedback). e7 branches off e0 with an
   UNREACHABLE-by-construction target (asks for iron-ore from a coal-only
-  module) — exercises the all-attempts-fail return path. e5 / e6 / e7's
-  saves are orphans (no downstream depends_on).
+  module) — exercises the all-attempts-fail return path. e8 branches off e0
+  and requires the Designer to use factorio_read (tile-info, validate-placement)
+  instead of pre-computed hints. e9 branches off e0 and exercises inter-module
+  belt connections: coal-burner-cell output feeds iron-smelt-line fuel input.
+  e5 / e6 / e7 / e8 / e9's saves are orphans (no downstream depends_on).
 nodes:
   - id: e0-bootstrap
   - id: e1-first-coal
@@ -26,5 +29,9 @@ nodes:
   - id: e6-recovery-test
     depends_on: [e0-bootstrap]
   - id: e7-unreachable-iron
+    depends_on: [e0-bootstrap]
+  - id: e8-probe-driven-design
+    depends_on: [e0-bootstrap]
+  - id: e9-coal-feeds-iron
     depends_on: [e0-bootstrap]
 
