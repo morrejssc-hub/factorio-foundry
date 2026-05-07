@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { exists, ensureDir } from "./fs-util.js";
+import { getLuaLibPreamble } from "./lua-lib.js";
 import { buildLuaCommand, buildLuaCommandFromWorkspace, rconExec } from "./rcon.js";
 import { directionName, loadEntityGeometries, solveLayout } from "./geometry/index.js";
 
@@ -844,8 +845,10 @@ print_inventory(inv)
   // Used by the foundry-probe pi extension so the designer can run scripts from
   // its own cwd (lib/probes/ symlink + any script it writes itself).
   async runProbeScript(lua, params = {}) {
-    validateReadOnlyLua(lua, "<designer-probe>");
-    const command = buildLuaCommand("designer-probe.lua", lua, params);
+    const preamble = await getLuaLibPreamble(this.config.agentWorkspace);
+    const combined = preamble ? `${preamble}\n${lua}` : lua;
+    validateReadOnlyLua(combined, "<designer-probe>");
+    const command = buildLuaCommand("designer-probe.lua", combined, params);
     const output = await this.rcon(command, 60000);
     return { output: output || "(empty response)", readonly: true };
   }

@@ -15,8 +15,8 @@
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { readFile } from "node:fs/promises";
-import { resolve, normalize, isAbsolute } from "node:path";
+import { readFile, appendFile } from "node:fs/promises";
+import { resolve, normalize, isAbsolute, join } from "node:path";
 
 export default function foundryReadExtension(pi: ExtensionAPI) {
   const serviceUrl =
@@ -81,25 +81,58 @@ export default function foundryReadExtension(pi: ExtensionAPI) {
 
       const lua = await readFile(absolute, "utf8");
 
-      const response = await fetch(`${serviceUrl}/tool/foundry_probe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lua, params: input.params ?? {} }),
-        signal,
-      });
+      const startedAt = Date.now();
+      const ts = new Date().toISOString();
+      let ok = true;
+      let errorMessage: string | undefined;
+      let result: { output?: string } = {};
 
-      const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-      if (!response.ok || payload.ok === false) {
-        throw new Error(
-          (payload.error as string) || `foundry_probe HTTP ${response.status}`
-        );
+      try {
+        const response = await fetch(`${serviceUrl}/tool/foundry_probe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lua, params: input.params ?? {} }),
+          signal,
+        });
+
+        const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!response.ok || payload.ok === false) {
+          ok = false;
+          errorMessage =
+            (payload.error as string) || `foundry_probe HTTP ${response.status}`;
+          throw new Error(errorMessage);
+        }
+
+        result = (payload.result as { output?: string }) ?? {};
+        return {
+          content: [{ type: "text" as const, text: result.output ?? "(empty)" }],
+          details: result,
+        };
+      } catch (err) {
+        ok = false;
+        if (!errorMessage) {
+          errorMessage = err instanceof Error ? err.message : String(err);
+        }
+        throw err;
+      } finally {
+        const record = {
+          ts,
+          script_path: scriptPath,
+          lua,
+          params: input.params ?? {},
+          ok,
+          elapsed_ms: Date.now() - startedAt,
+          ...(ok ? {} : { error: errorMessage }),
+        };
+        try {
+          await appendFile(
+            join(cwd, "probe-calls.jsonl"),
+            JSON.stringify(record) + "\n"
+          );
+        } catch {
+          // best-effort: never fail the tool because logging failed
+        }
       }
-
-      const result = payload.result as { output?: string };
-      return {
-        content: [{ type: "text" as const, text: result.output ?? "(empty)" }],
-        details: result,
-      };
     },
   });
 }

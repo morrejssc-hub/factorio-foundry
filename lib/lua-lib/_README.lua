@@ -1,0 +1,13 @@
+-- lib/lua-lib/ — designer Lua sandbox preamble
+--
+-- Every .lua file in this directory is concatenated (sorted by filename) and
+-- prepended to every script the designer submits via /tool/foundry_probe.
+-- The combined script is then run through the read-only validator
+-- (READ_ONLY_FORBIDDEN in src/factorio-server.js) before execution.
+--
+-- Files here MUST define top-level Lua functions (or a returned module table)
+-- that the designer's scratch script can call directly. Do NOT put
+-- standalone "return ..." scripts here — those belong in lib/probes/.
+--
+-- This file is comments-only on purpose. The library is empty by design and
+-- grows from real evidence (see docs/lua-lib-promotion.md).
