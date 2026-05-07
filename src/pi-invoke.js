@@ -135,6 +135,10 @@ export async function piInvoke(opts) {
     let stderr = "";
     let stdoutLine = "";
     let stderrLine = "";
+    // Cap in-memory accumulation to prevent RangeError on long-running
+    // agents (e.g. qwen3.6-plus with high thinking). stdout is only used
+    // for the forbidden-tool pattern check in design.js, which fires early.
+    const STDOUT_CAP = 8 * 1024 * 1024; // 8 MB
 
     // Aggregated metrics. Each `turn_end` event in the JSON stream contributes
     // its message.usage / message.cost; the last seen model + provider win.
@@ -219,7 +223,7 @@ export async function piInvoke(opts) {
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      stdout += text;
+      if (stdout.length < STDOUT_CAP) stdout += text;
       stdoutLine += text;
       let idx;
       while ((idx = stdoutLine.indexOf("\n")) !== -1) {

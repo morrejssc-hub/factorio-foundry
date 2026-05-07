@@ -126,59 +126,62 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
 
   // First attempt.
   const trace = newTrace("probe");
-  const result = await piInvoke({ ...piOpts, prompt: userMessage });
-  addPiCall(trace, result);
-
-  let text = await readFile(stateYamlPath, "utf8").catch(() => null);
-  let parsed = text ? parseYaml(text) : null;
-  let validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced"], warnings: [], unwrapped: false };
-  let errors = validation.errors;
-  for (const w of validation.warnings || []) console.log(`[probe normalize] ${w}`);
-  if (validation.effective) parsed = validation.effective;
-
-  // One retry: if the first attempt failed schema (or didn't write the file),
-  // feed the previous attempt's content + validator errors back to a fresh
-  // pi session so the model can correct it. Bounded to one retry — if the
-  // model can't recover from explicit error feedback, escalate to user.
-  if (errors.length) {
-    const previousYaml = text ?? "(no state.yaml was written)";
-    const errorList = errors.map((e) => `  - ${e}`).join("\n");
-    const retryMessage = [
-      `Your previous Probe phase output failed schema validation.`,
-      ``,
-      `Errors from the deterministic validator:`,
-      errorList,
-      ``,
-      `Your previous state.yaml content (truncated to 4000 chars):`,
-      "```yaml",
-      previousYaml.slice(0, 4000),
-      "```",
-      ``,
-      `Re-emit a corrected state.yaml at the bare relative path \`state.yaml\``,
-      `(no absolute paths, no \`..\`, no subdirectories). The required schema`,
-      `is in your system prompt — re-read it. The validator only accepts the`,
-      `keys: tick, worker, inventory_summary, coal_patches, iron_patches,`,
-      `notes (optional). No other top-level keys.`,
-      ``,
-      `Use factorio_read again only if you need to re-confirm a value; you`,
-      `may also reuse facts from your previous attempt above.`,
-    ].join("\n");
-    console.log(`[probe] schema validation failed; retrying with error feedback`);
-    const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
-    addPiCall(trace, retryResult);
-    trace.schema_retry = true;
+  let result, text, parsed, validation, errors;
+  try {
+    result = await piInvoke({ ...piOpts, prompt: userMessage });
+    addPiCall(trace, result);
 
     text = await readFile(stateYamlPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
-    validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced on retry"], warnings: [], unwrapped: false };
+    validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced"], warnings: [], unwrapped: false };
     errors = validation.errors;
-    for (const w of validation.warnings || []) console.log(`[probe normalize] ${w} (retry)`);
+    for (const w of validation.warnings || []) console.log(`[probe normalize] ${w}`);
     if (validation.effective) parsed = validation.effective;
-  }
 
-  // Persist the trace regardless of success/failure so summary tooling can
-  // observe how much was spent even on phases that ultimately threw.
-  await writePiTrace(outDir, trace);
+    // One retry: if the first attempt failed schema (or didn't write the file),
+    // feed the previous attempt's content + validator errors back to a fresh
+    // pi session so the model can correct it. Bounded to one retry — if the
+    // model can't recover from explicit error feedback, escalate to user.
+    if (errors.length) {
+      const previousYaml = text ?? "(no state.yaml was written)";
+      const errorList = errors.map((e) => `  - ${e}`).join("\n");
+      const retryMessage = [
+        `Your previous Probe phase output failed schema validation.`,
+        ``,
+        `Errors from the deterministic validator:`,
+        errorList,
+        ``,
+        `Your previous state.yaml content (truncated to 4000 chars):`,
+        "```yaml",
+        previousYaml.slice(0, 4000),
+        "```",
+        ``,
+        `Re-emit a corrected state.yaml at the bare relative path \`state.yaml\``,
+        `(no absolute paths, no \`..\`, no subdirectories). The required schema`,
+        `is in your system prompt — re-read it. The validator only accepts the`,
+        `keys: tick, worker, inventory_summary, coal_patches, iron_patches,`,
+        `notes (optional). No other top-level keys.`,
+        ``,
+        `Use factorio_read again only if you need to re-confirm a value; you`,
+        `may also reuse facts from your previous attempt above.`,
+      ].join("\n");
+      console.log(`[probe] schema validation failed; retrying with error feedback`);
+      const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
+      addPiCall(trace, retryResult);
+      trace.schema_retry = true;
+
+      text = await readFile(stateYamlPath, "utf8").catch(() => null);
+      parsed = text ? parseYaml(text) : null;
+      validation = parsed ? validateState(parsed) : { effective: null, errors: ["state.yaml not produced on retry"], warnings: [], unwrapped: false };
+      errors = validation.errors;
+      for (const w of validation.warnings || []) console.log(`[probe normalize] ${w} (retry)`);
+      if (validation.effective) parsed = validation.effective;
+    }
+  } finally {
+    // Always persist trace so summary tooling sees actual wall time / tokens
+    // even when piInvoke throws (e.g. timeout). Non-fatal if write fails.
+    await writePiTrace(outDir, trace).catch((e) => console.log(`[probe] trace write failed (non-fatal): ${e.message}`));
+  }
 
   if (!text) {
     throw new Error(`probe phase did not produce state.yaml in ${outDir}`);
