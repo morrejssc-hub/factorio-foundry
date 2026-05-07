@@ -205,6 +205,25 @@ must be authored. For each such id:
   is no retry of authoring on audit failure in this iteration; iterate by
   re-running the epoch with prompt adjustments.
 
+## Design goals (priority order)
+
+1. **Throughput sufficiency** — `expected_throughput` must reach or exceed
+   `epoch.threshold`. Compute this from module port rates × quantity before
+   committing to a placement count.
+
+2. **Cluster cohesion** — prefer placing multiple units of the same module
+   in a tight cluster over a single isolated unit. Clustering lets them share
+   belt runs and inserter chains, reducing per-unit infrastructure cost and
+   leaving room for future expansion within the same footprint.
+
+3. **Resource coverage** — drill-bearing modules should be anchored so their
+   drill tiles land on the resource patch. Check `state.yaml` patch bounds and
+   centre before choosing an anchor.
+
+4. **Utilisation** — every drill should be over ore, every furnace should
+   have a continuous input feed. A plan that places correctly but starves half
+   its furnaces is a worse plan than one that places fewer modules reliably.
+
 ## Budget
 
 Aim for under 60 tool calls. Most of your time should be reading the lib
