@@ -5,10 +5,12 @@ description: |
   with the existing coal-burner-cell. e5 branches off e0 to test MODULE
   CREATION — the Designer authors a new coal-cluster-cell module and the
   pipeline verifies it; on audit pass the module promotes to lib/ for use
-  by future epochs. e6 branches off e0 with recovery_attempts: 3 and an
-  unreachable threshold to exercise the retry loop (audit-fail → re-design
-  with prior-attempt feedback). e5 / e6's saves are orphans (no downstream
-  depends_on).
+  by future epochs. e6 branches off e0 with recovery_attempts: 3 and a
+  high-but-reachable threshold to exercise the retry loop (audit-fail →
+  re-design with prior-attempt feedback). e7 branches off e0 with an
+  UNREACHABLE-by-construction target (asks for iron-ore from a coal-only
+  module) — exercises the all-attempts-fail return path. e5 / e6 / e7's
+  saves are orphans (no downstream depends_on).
 nodes:
   - id: e0-bootstrap
   - id: e1-first-coal
@@ -22,5 +24,7 @@ nodes:
   - id: e5-coal-cluster-cell
     depends_on: [e0-bootstrap]
   - id: e6-recovery-test
+    depends_on: [e0-bootstrap]
+  - id: e7-unreachable-iron
     depends_on: [e0-bootstrap]
 
