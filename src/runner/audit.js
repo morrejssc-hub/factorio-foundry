@@ -11,6 +11,15 @@ import { rconExec, buildLuaCommand } from "../rcon.js";
 
 const TICKS_PER_SECOND = 60;
 
+async function rconCountEntities(config) {
+  const command = `/silent-command rcon.print(#game.surfaces[1].find_entities())`;
+  const body = await rconExec({
+    host: config.rconHost, port: config.rconPort,
+    password: config.rconPassword, command, timeoutMs: 10000,
+  });
+  return parseInt(body.trim(), 10) || 0;
+}
+
 async function rconRunScript({ config, scriptPath, params }) {
   const lua = await readFile(scriptPath, "utf8");
   const command = buildLuaCommand(scriptPath.split("/").pop(), lua, params);
@@ -64,9 +73,13 @@ export async function runAudit({ config, targetMetric, outDir }) {
   const windowTicks = params.window_ticks ?? 3600;
   const minRatePerS = params.min_rate_per_s ?? 0;
 
+  const auditStart = Date.now();
   const before = await rconRunScript({ config, scriptPath, params });
   await waitTicks({ config, ticks: windowTicks });
   const after = await rconRunScript({ config, scriptPath, params });
+  const wall_clock_ms = Date.now() - auditStart;
+
+  const entity_count = await rconCountEntities(config).catch(() => null);
 
   const tickDelta = after.tick - before.tick;
   const producedDelta = after.cumulative_produced - before.cumulative_produced;
@@ -83,6 +96,8 @@ export async function runAudit({ config, targetMetric, outDir }) {
     window_ticks_actual: tickDelta,
     seconds_actual: seconds,
     produced_delta: producedDelta,
+    wall_clock_ms,
+    entity_count,
     before,
     after,
     audit_script: targetMetric.audit,

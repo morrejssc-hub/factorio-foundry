@@ -20,6 +20,7 @@ import {
   candidateId, candidateDir, epochSaveDir, runSavePath,
   winnerSavePath, resolveInputSave, promoteWinner, writeManifest,
 } from "./run-layout.js";
+import { pickWinner } from "./select-winner.js";
 
 export async function loadEpoch(epochsDir, epochId) {
   const path = resolve(epochsDir, `${epochId}.yaml`);
@@ -297,6 +298,8 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
 
   const actualAttempts = winning ? winning.attempt : attemptRecords.length;
 
+  const selection = pickWinner(attemptRecords, epoch.optimize);
+
   if (winning) {
     const { designResult, verdict, exResult: winExResult } = winning;
     await promoteWinner(winExResult.savePath, winnerPath);
@@ -306,6 +309,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       run_ts: runTs,
       winner_candidate: candidateId(winning.attempt - 1),
       winner_save: winnerPath,
+      winner_evidence: selection,
       candidates: attemptRecords.map((r) => ({
         candidate: r.candidate,
         save: r.candidateSavePath,
