@@ -1,6 +1,8 @@
-// design.js — Design phase. Spawns `pi -p` WITHOUT any factorio_action /
-// factorio_read tools. The pi process can only read state.yaml, lib files,
-// and factorio_api_docs. Output: plan.yaml.
+// design.js — Design phase. Spawns `pi -p` with read-only Factorio access
+// (factorio_read via the foundry-read extension) but WITHOUT factorio_action.
+// The designer can probe the live game for targeted queries (tile info,
+// placement validation, resource scans) but cannot place anything.
+// Output: plan.yaml.
 //
 // This is the architectural lever that prevents the "4-miner copy" bug seen
 // in ~/factorio-agent: the agent literally cannot place anything, so its
@@ -15,15 +17,10 @@ import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 
 const FORBIDDEN_TOOL_PATTERNS = [
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_action/i,
-  /tool[_-]?name["']?\s*[:=]\s*["']?factorio_read/i,
   /\bfactorio_action\s*\(/,
-  // pi --mode json tool-call events serialize the tool name as a JSON string
-  // value. Match either `"tool":"factorio_action"` or any other JSON field
-  // whose value is the disallowed tool. The substring check is conservative
-  // — even an error event mentioning the tool counts as evidence of an
-  // attempt and trips this guard.
+  // pi --mode json tool-call events serialize the tool name as a JSON string.
+  // factorio_action is forbidden; factorio_read is allowed (read-only probes).
   /:\s*"factorio_action"/,
-  /:\s*"factorio_read"/,
 ];
 
 async function ensureSymlink(target, linkPath) {
@@ -173,6 +170,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
 
   const systemPrompt = await readFile(resolve(config.rootDir, "prompts/design.md"), "utf8");
   const factorioApiDocsExt = resolve(config.rootDir, ".pi/extensions/factorio-api-docs/index.ts");
+  const foundryReadExt     = resolve(config.rootDir, ".pi/extensions/foundry-read/index.ts");
 
   const allowedModulesList = (epoch.allowed_modules || []).join(", ") || "(none)";
 
@@ -265,8 +263,8 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
 
   const piOpts = {
     systemPrompt,
-    tools: ["read", "write", "ls", "grep", "find", "factorio_api_docs"],
-    extensions: [factorioApiDocsExt],
+    tools: ["read", "write", "ls", "grep", "find", "factorio_api_docs", "factorio_read"],
+    extensions: [factorioApiDocsExt, foundryReadExt],
     cwd: outDir,
     serviceUrl: config.serviceUrl,
     timeoutMs: epoch.budgets?.design_timeout_ms ?? 600_000,
