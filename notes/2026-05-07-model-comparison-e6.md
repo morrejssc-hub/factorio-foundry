@@ -3,9 +3,11 @@
 ## TL;DR
 
 同一个 e6（recovery_attempts=3, single coal-burner-cell, threshold 0.95
-coal/s）跑了 4 个不同的 LLM。**只有 gpt-5.5 想到"复制模块到 4 个"，其他三个
-都只会换 anchor**。这意味着之前 e1-e6 报告的所有"成功率"实际上是 gpt-5.5
-（通过 pi 默认 provider 静默选中）的产物，不是基础设施保证。
+coal/s）跑了多个不同的 LLM。**最初只有 gpt-5.5 想到"复制模块到 4 个"**；加入
+Design Goals prompt 段落（cluster cohesion / throughput sufficiency）后，
+**qwen3.6-plus 也在 attempt 2 通过**（1→4 轨迹），其余模型未重测。
+
+### 原始对比（无 Design Goals，无 designer-history）
 
 | Model | Provider | 轨迹 | wall | tokens | pass | 失败模式 |
 |---|---|---|---|---|---|---|
@@ -15,6 +17,12 @@ coal/s）跑了 4 个不同的 LLM。**只有 gpt-5.5 想到"复制模块到 4 �
 | qwen3-6-27b | local llama-api | 1→💥→💥 | 5m11s + 2×timeout | 0\* | ❌ | 超时 |
 | deepseek-v4-pro | DeepSeek | 1→1→1† | — | — | ❌ | repair pi 清岩，但仍只 1 placement |
 | gemini-3.1-pro-preview | undy | 1→1→1‡ | — | — | ❌ | 误读 meta：以为阈值故意不可达 |
+
+### 修复后（加入 Design Goals + designer-history.yaml）
+
+| Model | Provider | 轨迹 | pass | 备注 |
+|---|---|---|---|---|
+| qwen3.6-plus | bailian (百炼) | 1→**4** | ✅ | attempt 2，measured=0.999/s |
 
 † attempt 3 repair pi 主动分析障碍（大岩石 blocking belt），提议并执行
 `mine-simple-entity` 清岩后成功 execute，但 measured=0。策略层面仍是"换
@@ -64,11 +72,21 @@ defaultModel 是这个），实际上：
   throughput threshold."` — 模型主动总结了它的策略转变
 
 ### 2. qwen3.6-plus (bailian)
+
+**原始跑（无 Design Goals）：**
 - run dir: `plans/e6-recovery-test-2026-05-07T01-33-32-071Z/`
 - 1m44s 总耗时，3 attempts 都 1 placement / 0.25/s
 - 思考链很长（`thinking` 内容数倍于 `text`）
 - 失败模式：每次都换 anchor，从不改数量。读到"prior failed at
   measured=0.25"反馈也只是改坐标
+
+**修复后（加 Design Goals + designer-history.yaml）：**
+- run dir: `plans/e6-recovery-test-2026-05-07T08-09-28-634Z/`
+- attempt 1: 1 placement → 0.250/s（失败，记入 designer-history）
+- **attempt 2: 4 placements → 0.999/s ✅**
+- 关键推理："Attempt 1 measured ~0.25 coal/s — far below 0.95. Inventory
+  supports 4 cells exactly. All 4 footprints fit the coal patch."
+- 模型自己算了 N、验证库存、检查空间，未依赖公式提示
 
 ### 3. glm-5 (bailian)
 - run dir: `plans/e6-recovery-test-2026-05-07T02-25-...Z/`
@@ -187,8 +205,10 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
   `pi-invoke.js` 加 8MB cap（`stdout` 只用于 design.js forbidden-tool 检查，
   早期输出即可覆盖，cap 安全）
 - [x] e1-e5 cross-model 重测（qwen3.6-plus）：**全部 5/5 通过**，见下表
-- [ ] design prompt 里的"levers"考虑加更明显的 "scale up" 提示，让较弱
-  模型也能想到复制
+- [x] design prompt 里的"levers"考虑加更明显的 "scale up" 提示，让较弱
+  模型也能想到复制 → 改为 Design Goals 段落（4 条优先级目标：throughput
+  sufficiency / cluster cohesion / resource coverage / utilisation），
+  qwen3.6-plus 验证有效，attempt 2 通过 e6（commit `7a31114`）
 - [ ] 考虑 `epoch.yaml` 加 `model_min_capability` 字段，标记某 epoch 已
   在哪些模型上验证过通过
 
@@ -203,7 +223,21 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
 | e5-coal-cluster-cell | ✅ | 0.500 | 0.40 | coal | 1 |
 
 结论：e1-e5 这五个 epoch 确实是基础设施层面可重现的能力，不依赖 gpt-5.5
-的特殊智能。qwen3.6-plus 全部一次通过。e6 仍然是 gpt-5.5 孤例。
+的特殊智能。qwen3.6-plus 全部一次通过。
+
+## qwen3.6-plus 全 epoch 结果（修复后，2026-05-07）
+
+| epoch | 轨迹 | pass | measured | threshold | item |
+|---|---|---|---|---|---|
+| e1-first-coal | 1 | ✅ | 0.250 | 0.10 | coal |
+| e2-first-iron | 1 | ✅ | 0.233 | 0.05 | iron-plate |
+| e3-first-copper | 1 | ✅ | 0.233 | 0.05 | copper-plate |
+| e4-coal-pair | 1 | ✅ | 0.500 | 0.30 | coal |
+| e5-coal-cluster-cell | 1 | ✅ | 0.500 | 0.40 | coal |
+| e6-recovery-test | 1→**4** | ✅ | 0.999 | 0.95 | coal |
+| e7-unreachable-iron | 1→1→1 | ✅ (ok=false 预期) | 0 | 0.1 | iron-plate |
+
+e6 需要 Design Goals + designer-history 才能通过。e7 all-fail 路径正确。
 
 中途发现并修复的 bug（与本次重测直接相关）：
 1. **stdout OOM**（pi-invoke.js）：qwen3.6-plus 在 e2 probe 期间 stdout 超出
@@ -215,7 +249,6 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
 ## 不在范围
 
 - A 项（连接编译器 / 多模块布带）
-- 调 design prompt 让 qwen 也通过 e6（需要先决定是不是真的应该这样）
 - 接入更多 provider（anthropic / DeepSeek 等）
 
 ## 相关 commits
@@ -224,6 +257,9 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
 - `2388c9c` 恢复 `FOUNDRY_PI_EXTENSIONS` 钩子（per-machine 实验通道）
 - `de49445` 观测层 (run-meta + summary)
 - `c1b10fb` / `ba01e6f` e7 epoch（"all attempts fail" 路径验证）
+- `85fc156` probe try/finally + pi-invoke 8MB stdout cap
+- `39cb863` designer-history.yaml + why_not_replicate→scaling_note 改名
+- `7a31114` Design Goals prompt 段落（验证 qwen e6 通过）
 
 ## 相关 plan run dirs（gitignored 但保留作 reference）
 
