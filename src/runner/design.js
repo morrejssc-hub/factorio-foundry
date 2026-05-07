@@ -11,11 +11,19 @@ import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 import { normalize, PLAN_SCHEMA } from "./schema-norm.js";
 import { loadModule } from "../lib-loader.js";
+import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 
 const FORBIDDEN_TOOL_PATTERNS = [
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_action/i,
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_read/i,
   /\bfactorio_action\s*\(/,
+  // pi --mode json tool-call events serialize the tool name as a JSON string
+  // value. Match either `"tool":"factorio_action"` or any other JSON field
+  // whose value is the disallowed tool. The substring check is conservative
+  // — even an error event mentioning the tool counts as evidence of an
+  // attempt and trips this guard.
+  /:\s*"factorio_action"/,
+  /:\s*"factorio_read"/,
 ];
 
 async function ensureSymlink(target, linkPath) {
@@ -296,8 +304,14 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
 
   const planPath = join(outDir, "plan.yaml");
 
+  // Per-phase trace: every piInvoke() result is folded in (the schema-retry
+  // path may add a second invocation). Includes previous_attempts so the
+  // summary tool can highlight retried recovery attempts vs first tries.
+  const trace = newTrace("design", { previous_attempts: previousAttempts.length });
+
   // First attempt.
   const result = await piInvoke({ ...piOpts, prompt: userMessage });
+  addPiCall(trace, result);
 
   // Hard verification of the architectural invariant: design phase stdout
   // must contain zero factorio_action / factorio_read tool invocations.
@@ -368,7 +382,9 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       `runbook.`,
     ].join("\n");
     console.log(`[design] schema validation failed; retrying with error feedback`);
-    await piInvoke({ ...piOpts, prompt: retryMessage });
+    const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
+    addPiCall(trace, retryResult);
+    trace.schema_retry = true;
 
     text = await readFile(planPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
@@ -383,6 +399,10 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       errors = [...errors, ...stagedResult.errors];
     }
   }
+
+  // Persist the trace regardless of success/failure so summary tooling can
+  // observe how much was spent even on phases that ultimately threw.
+  await writePiTrace(outDir, trace);
 
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);
   if (errors.length) {

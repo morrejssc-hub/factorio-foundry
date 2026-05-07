@@ -10,6 +10,7 @@
 import { mkdir, copyFile, readFile, writeFile, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { piInvoke } from "../pi-invoke.js";
+import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 
 async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
   const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
@@ -108,6 +109,12 @@ async function repairWithPi({ config, epoch, plan, placement, error, outDir, log
     onStdout: (line) => log(`[repair pi] ${line}`),
     onStderr: (line) => process.stderr.write(`[repair pi err] ${line}\n`),
   });
+  // Persist the repair trace alongside failed.json so cost/timing of the
+  // repair pi call is preserved on disk. Not yet rolled up into run-meta;
+  // operators can sum repairDir/*/pi-trace.json manually for now.
+  const trace = newTrace("execute_repair", { placement_id: placement.id });
+  addPiCall(trace, result);
+  await writePiTrace(repairDir, trace);
   return result;
 }
 

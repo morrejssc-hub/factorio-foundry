@@ -15,6 +15,7 @@ import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
 import { runExecute } from "./execute.js";
 import { runAudit } from "./audit.js";
+import { writeSummary } from "./run-summary.js";
 
 export async function loadEpoch(epochsDir, epochId) {
   const path = resolve(epochsDir, `${epochId}.yaml`);
@@ -136,6 +137,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   // from the same blank slate. previousAttempts is fed to design so the
   // next LLM call sees a focused brief on what already failed.
   const previousAttempts = [];
+  const attemptRecords = [];
   let winning = null;
   let lastVerdict = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -152,6 +154,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     }
 
     let designResult, modules, dryResult, exResult, verdict;
+    let attemptError = null;
     try {
       log(`[epoch ${epoch.id}] attempt ${attempt}: design`);
       designResult = await runDesign({
@@ -197,16 +200,17 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       lastVerdict = verdict;
 
       if (verdict.pass) {
-        winning = { designResult, modules, exResult, verdict, stagedDir };
-        break;
+        winning = { designResult, modules, exResult, verdict, stagedDir, attempt };
+      } else {
+        previousAttempts.push({
+          attempt,
+          plan: designResult.plan,
+          verdict,
+          authored: designResult.authored,
+        });
       }
-      previousAttempts.push({
-        attempt,
-        plan: designResult.plan,
-        verdict,
-        authored: designResult.authored,
-      });
     } catch (error) {
+      attemptError = error.message;
       log(`[epoch ${epoch.id}] attempt ${attempt} failed before audit: ${error.message}`);
       previousAttempts.push({
         attempt,
@@ -214,28 +218,72 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         authored: designResult?.authored,
         error: error.message,
       });
-      // If this was the last attempt and we never got a clean audit, bail.
-      if (attempt === maxAttempts) {
-        throw error;
-      }
     }
+
+    // Record this attempt's full disposition for run-meta. The earlier
+    // "throw on last pre-audit failure" behaviour is replaced by uniform
+    // return-with-ok=false; callers can inspect attemptsDetail to see
+    // exactly which phase failed.
+    attemptRecords.push({
+      attempt,
+      attemptDir,
+      designOut,
+      executeOut,
+      placements: designResult?.plan?.placements?.length ?? null,
+      authored: designResult?.authored?.map((a) => a.id) ?? [],
+      dry_validate: dryResult ? { ok: dryResult.ok, errors: dryResult.errors ?? [] } : null,
+      execute: exResult ? { ok: exResult.ok, save_path: exResult.savePath } : null,
+      audit: verdict ? {
+        pass: verdict.pass,
+        measured: verdict.measured,
+        threshold: verdict.threshold,
+        item: verdict.item,
+        seconds_actual: verdict.seconds_actual,
+        produced_delta: verdict.produced_delta,
+      } : null,
+      error: attemptError,
+    });
+
+    if (winning) break;
   }
 
-  if (!winning) {
-    log(`[epoch ${epoch.id}] all ${maxAttempts} attempts failed audit`);
+  const actualAttempts = winning ? winning.attempt : attemptRecords.length;
+
+  if (winning) {
+    const { designResult, verdict } = winning;
+    if (designResult.authored?.length) {
+      await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
+    }
+    await writeDigest({ config, epoch, verdict, runDir });
+  } else {
+    log(`[epoch ${epoch.id}] all ${maxAttempts} attempts failed`);
     if (lastVerdict) {
       await writeDigest({ config, epoch, verdict: lastVerdict, runDir });
     }
-    return { ok: false, verdict: lastVerdict, runDir, attempts: previousAttempts };
   }
 
-  const { designResult, verdict, stagedDir } = winning;
-  if (designResult.authored?.length) {
-    await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
+  await writeRunMeta({
+    runDir, epoch, ok: !!winning, inputSave, outputSave,
+    maxAttempts, actualAttempts, probeCacheHit: !!probeResult.cacheHit,
+    attemptRecords, lastVerdict: winning ? winning.verdict : lastVerdict,
+  });
+
+  // Auto-render summary.md alongside run-meta.json. Failure is non-fatal
+  // (observability shouldn't block the actual return).
+  try {
+    const { markdownPath } = await writeSummary(runDir);
+    log(`[epoch ${epoch.id}] summary → ${markdownPath}`);
+  } catch (error) {
+    log(`[epoch ${epoch.id}] summary write failed (non-fatal): ${error.message}`);
   }
 
-  await writeDigest({ config, epoch, verdict, runDir });
-  return { ok: verdict.pass, verdict, runDir, attempts: previousAttempts.length + 1 };
+  return {
+    ok: !!winning,
+    verdict: winning ? winning.verdict : lastVerdict,
+    runDir,
+    attempts: actualAttempts,
+    attemptsDetail: attemptRecords,
+  };
 }
 
 async function promoteStagedModules({ config, authored, log, epochId }) {
@@ -246,6 +294,89 @@ async function promoteStagedModules({ config, authored, log, epochId }) {
     await copyFile(a.jsonPath, blueprintDest);
     log(`[epoch ${epochId}] promoted staged module '${a.id}' → ${moduleDest} + ${blueprintDest}`);
   }
+}
+
+async function readJsonOrNull(path) {
+  try { return JSON.parse(await readFile(path, "utf8")); }
+  catch { return null; }
+}
+
+// Aggregate pi-trace.json files across the run into a single, summary-friendly
+// object and persist as <runDir>/run-meta.json. Tolerant of missing trace
+// files (e.g. probe cache hit before pi-trace was added; pre-audit attempt
+// failures where design dir might be empty).
+async function writeRunMeta({
+  runDir, epoch, ok, inputSave, outputSave,
+  maxAttempts, actualAttempts, probeCacheHit,
+  attemptRecords, lastVerdict,
+}) {
+  const probeTrace = await readJsonOrNull(join(runDir, "probe", "pi-trace.json"));
+  const probeBlock = {
+    cache_hit: probeCacheHit,
+    wall_ms: probeTrace?.wall_ms ?? 0,
+    usage: probeTrace?.usage ?? null,
+    cost_usd: probeTrace?.cost?.total ?? 0,
+    model: probeTrace?.model ?? null,
+    provider: probeTrace?.provider ?? null,
+    schema_retry: probeTrace?.schema_retry ?? false,
+  };
+
+  const totals = {
+    wall_ms: probeBlock.wall_ms,
+    tokens: probeTrace?.usage?.totalTokens ?? 0,
+    cost_usd: probeBlock.cost_usd,
+  };
+
+  const attempts = [];
+  for (const r of attemptRecords) {
+    const trace = await readJsonOrNull(join(r.designOut, "pi-trace.json"));
+    const designBlock = {
+      placements: r.placements,
+      authored: r.authored,
+      wall_ms: trace?.wall_ms ?? 0,
+      usage: trace?.usage ?? null,
+      cost_usd: trace?.cost?.total ?? 0,
+      model: trace?.model ?? null,
+      provider: trace?.provider ?? null,
+      schema_retry: trace?.schema_retry ?? false,
+      previous_attempts: trace?.previous_attempts ?? 0,
+    };
+    totals.wall_ms += designBlock.wall_ms;
+    totals.tokens += trace?.usage?.totalTokens ?? 0;
+    totals.cost_usd += designBlock.cost_usd;
+    attempts.push({
+      attempt: r.attempt,
+      design: designBlock,
+      dry_validate: r.dry_validate,
+      execute: r.execute,
+      audit: r.audit,
+      error: r.error,
+    });
+  }
+
+  const meta = {
+    epoch: epoch.id,
+    ok,
+    input_save: inputSave,
+    output_save: outputSave,
+    max_attempts: maxAttempts,
+    actual_attempts: actualAttempts,
+    probe: probeBlock,
+    attempts,
+    final_verdict: lastVerdict ? {
+      pass: lastVerdict.pass,
+      item: lastVerdict.item,
+      measured: lastVerdict.measured,
+      threshold: lastVerdict.threshold,
+    } : null,
+    totals,
+  };
+  try {
+    await writeFile(join(runDir, "run-meta.json"), JSON.stringify(meta, null, 2), "utf8");
+  } catch (error) {
+    console.log(`[run-meta] write failed (non-fatal): ${error.message}`);
+  }
+  return meta;
 }
 
 async function writeDigest({ config, epoch, verdict, runDir }) {

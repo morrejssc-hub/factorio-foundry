@@ -8,6 +8,7 @@ import { parse as parseYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 import { normalize, STATE_SCHEMA } from "./schema-norm.js";
 import { probeCacheKey, readProbeCache, writeProbeCache } from "./probe-cache.js";
+import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 
 async function ensureSymlink(target, linkPath) {
   try {
@@ -85,6 +86,9 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
       // through to a fresh pi run.
       if (!validation.errors.length) {
         console.log(`[probe] cache hit (${cacheKey}) — skipping pi`);
+        const trace = newTrace("probe");
+        trace.cache_hit = true;
+        await writePiTrace(outDir, trace);
         return {
           stateYamlPath,
           state: validation.effective,
@@ -121,7 +125,9 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
   };
 
   // First attempt.
+  const trace = newTrace("probe");
   const result = await piInvoke({ ...piOpts, prompt: userMessage });
+  addPiCall(trace, result);
 
   let text = await readFile(stateYamlPath, "utf8").catch(() => null);
   let parsed = text ? parseYaml(text) : null;
@@ -158,7 +164,9 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
       `may also reuse facts from your previous attempt above.`,
     ].join("\n");
     console.log(`[probe] schema validation failed; retrying with error feedback`);
-    await piInvoke({ ...piOpts, prompt: retryMessage });
+    const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
+    addPiCall(trace, retryResult);
+    trace.schema_retry = true;
 
     text = await readFile(stateYamlPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
@@ -167,6 +175,10 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
     for (const w of validation.warnings || []) console.log(`[probe normalize] ${w} (retry)`);
     if (validation.effective) parsed = validation.effective;
   }
+
+  // Persist the trace regardless of success/failure so summary tooling can
+  // observe how much was spent even on phases that ultimately threw.
+  await writePiTrace(outDir, trace);
 
   if (!text) {
     throw new Error(`probe phase did not produce state.yaml in ${outDir}`);
