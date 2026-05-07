@@ -613,13 +613,16 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   log(`[epoch ${epoch.id}] initializing ${n}-slot instance pool…`);
   await pool.init(inputSave);
 
-  // Parallel execute + benchmark audit.
-  log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
-  const attemptRecords = await Promise.all(
-    designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log })),
-  );
-
-  await pool.shutdown();
+  let attemptRecords;
+  try {
+    // Parallel execute + benchmark audit.
+    log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
+    attemptRecords = await Promise.all(
+      designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log })),
+    );
+  } finally {
+    await pool.shutdown();
+  }
 
   const selection = pickWinner(attemptRecords, epoch.optimize);
   const winningRecord = attemptRecords.find((r) => r.audit?.pass);

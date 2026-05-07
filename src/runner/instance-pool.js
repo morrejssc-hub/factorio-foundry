@@ -65,32 +65,38 @@ export class InstancePool {
     const apiDocs = new FactorioApiDocs(this._slots[0].config);
     const wiki = new FactorioWiki(this._slots[0].config);
 
-    await Promise.all(this._slots.map(async (slot) => {
-      const { config } = slot;
-      for (const dir of [config.savesDir, config.configDir, config.logsDir, config.modsDir]) {
-        await mkdir(dir, { recursive: true });
-      }
+    try {
+      await Promise.all(this._slots.map(async (slot) => {
+        const { config } = slot;
+        for (const dir of [config.savesDir, config.configDir, config.logsDir, config.modsDir]) {
+          await mkdir(dir, { recursive: true });
+        }
 
-      const factorio = new FactorioServer(config);
-      await factorio.ensureLayout();
-      // Isolate write-data so each slot has its own .lock file, script-output,
-      // and player-data — prevents "exclusive lock" conflicts between slots.
-      await writeFile(config.configFile, makeSlotConfigIni(config.runtimeDir));
+        const factorio = new FactorioServer(config);
+        await factorio.ensureLayout();
+        // Isolate write-data so each slot has its own .lock file, script-output,
+        // and player-data — prevents "exclusive lock" conflicts between slots.
+        await writeFile(config.configFile, makeSlotConfigIni(config.runtimeDir));
 
-      if (inputSavePath) {
-        const target = factorio.savePath();
-        await mkdir(resolve(target, ".."), { recursive: true });
-        await copyFile(inputSavePath, target);
-      }
+        if (inputSavePath) {
+          const target = factorio.savePath();
+          await mkdir(resolve(target, ".."), { recursive: true });
+          await copyFile(inputSavePath, target);
+        }
 
-      const api = createApi(config, factorio, apiDocs, wiki);
-      await new Promise((res) => api.listen(config.servicePort, config.serviceHost, res));
+        const api = createApi(config, factorio, apiDocs, wiki);
+        await new Promise((res) => api.listen(config.servicePort, config.serviceHost, res));
 
-      await factorio.start();
+        await factorio.start();
 
-      slot.factorio = factorio;
-      slot.api = api;
-    }));
+        slot.factorio = factorio;
+        slot.api = api;
+      }));
+    } catch (err) {
+      // Partial init: clean up any slots that did start before re-throwing.
+      await this.shutdown();
+      throw err;
+    }
 
     this._available = [...this._slots];
   }
