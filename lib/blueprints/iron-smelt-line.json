@@ -1,8 +1,8 @@
 {
-  "version": 1,
-  "name": "iron_smelt_line_v1",
-  "description": "Burner mining drill on an iron-ore patch drops ore directly into an adjacent stone furnace; an inserter east of the furnace lifts iron-plate output into a chest. Externally fuelled via pre-seeded coal stacks (not self-sustaining beyond the initial fuel load).",
-  "anchor": "burner-mining-drill center; worker should place it on an iron-ore patch",
+  "version": 2,
+  "name": "iron_smelt_line_v2",
+  "description": "Burner mining drill on an iron-ore patch drops ore east into an adjacent stone furnace; output inserter (direction=west: picks from furnace output, drops into chest) lifts iron-plate into a chest. Coal arrives via a south-side transport-belt stub at dy=2.5 (coal_in port); two fuel inserters (direction=south: picks from belt at dy=2.5, drops north to dy=0.5 inside drill/furnace) sustain fuel. Connect coal_in port to an upstream coal source via plan.yaml connections.",
+  "anchor": "burner-mining-drill center; place on an iron-ore patch",
   "entities": [
     {
       "key": "drill",
@@ -31,35 +31,67 @@
       "dx": 4.5,
       "dy": 0.5,
       "direction": "north"
+    },
+    {
+      "key": "coal_in_belt_0",
+      "item": "transport-belt",
+      "dx": -0.5,
+      "dy": 2.5,
+      "direction": "east"
+    },
+    {
+      "key": "coal_in_belt_1",
+      "item": "transport-belt",
+      "dx": 0.5,
+      "dy": 2.5,
+      "direction": "east"
+    },
+    {
+      "key": "coal_in_belt_2",
+      "item": "transport-belt",
+      "dx": 1.5,
+      "dy": 2.5,
+      "direction": "east"
+    },
+    {
+      "key": "coal_in_belt_3",
+      "item": "transport-belt",
+      "dx": 2.5,
+      "dy": 2.5,
+      "direction": "east"
+    },
+    {
+      "key": "drill_fuel_inserter",
+      "item": "burner-inserter",
+      "dx": 0.5,
+      "dy": 1.5,
+      "direction": "south"
+    },
+    {
+      "key": "furnace_fuel_inserter",
+      "item": "burner-inserter",
+      "dx": 2.5,
+      "dy": 1.5,
+      "direction": "south"
     }
   ],
   "fuel": [
-    {
-      "target": "drill",
-      "item": "coal",
-      "count": 10
-    },
-    {
-      "target": "furnace",
-      "item": "coal",
-      "count": 5
-    },
-    {
-      "target": "output_inserter",
-      "item": "coal",
-      "count": 5
-    }
+    { "target": "drill",               "item": "coal", "count": 10 },
+    { "target": "furnace",             "item": "coal", "count": 5  },
+    { "target": "output_inserter",     "item": "coal", "count": 5  },
+    { "target": "drill_fuel_inserter", "item": "coal", "count": 5  },
+    { "target": "furnace_fuel_inserter","item": "coal", "count": 5  }
   ],
   "ports": {
+    "coal_in": {
+      "entity": "coal_in_belt_0",
+      "kind": "belt",
+      "item": "coal"
+    },
     "iron_plate_output_chest": {
       "entity": "iron_chest",
       "kind": "inventory",
       "item": "iron-plate"
     }
-  },
-  "assertions": [
-    "worker_selected_anchor_has_iron_ore_context",
-    "drill_drops_ore_directly_into_furnace",
-    "output_inserter_moves_iron_plate_to_chest"
-  ]
+  }
 }

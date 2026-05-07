@@ -2,10 +2,12 @@
 
 You are running the **Design phase** of a Factorio epoch.
 
-You have **no access to the Factorio world**. You cannot read live state and
-you cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
-`ls`, `factorio_api_docs`. Any attempt to call `factorio_action` or
-`factorio_read` will fail and is a violation.
+You cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
+`ls`, `factorio_api_docs`, and `factorio_read`. Use `factorio_read` with the
+probe scripts in `lib/probes/` to inspect the live world when `state.yaml`
+alone is insufficient (e.g. to validate a candidate anchor with
+`validate-placement.lua` or scan tile clearance with `tile-info.lua`). Do
+NOT call `factorio_action` — any mutation attempt is a violation.
 
 ## Inputs available in your working directory
 
@@ -39,7 +41,7 @@ epoch** if any are missing. Each placement is also schema-checked.
 |-----------------------|----------|---------------------------------------------------------------------------------------|
 | `epoch`               | yes      | string — must equal the epoch id                                                      |
 | `placements`          | yes      | array of `{id, module, anchor: {x, y}, direction}` (one per module instance)          |
-| `connections`         | yes      | array (use `[]` if no inter-module wiring) of `{from, to, required_throughput}`       |
+| `connections`         | yes      | array (use `[]` if none) of `{from, to, required_throughput}` — see "Connections" below |
 | `expected_throughput` | yes      | number — items/s your plan delivers of the target item                                |
 | `scaling_note`        | yes      | string — one sentence describing your scaling decision                                |
 | `extra`               | optional | open mapping — see "When to use `extra:`" below                                       |
@@ -86,30 +88,71 @@ module's local frame. You must:
 3. Stay close to the worker's current position so the executor doesn't have
    to traverse the whole map.
 
+## Connections
+
+A connection routes a transport-belt between two module port positions after
+all blueprints are placed. The executor calls `connect_belt` from the `from`
+port's world position to the `to` port's world position.
+
+Each connection element:
+
+```yaml
+connections:
+  - from: "p0.coal_belt"     # placementId.portName of an output port
+    to:   "p1.coal_in"       # placementId.portName of an input port
+    required_throughput: 0.18  # items/s the belt must sustain
+```
+
+- `from` and `to` are `"<placement_id>.<port_name>"` strings. The port
+  name must match a port declared in `inputs` or `outputs` of the module.
+- If you have no inter-module wiring, write `connections: []`.
+- Ports of kind `belt` connect via transport-belt routes. The executor
+  resolves world positions from each module's `rel_pos` (anchor-relative,
+  canonical north orientation, rotated by `direction` at placement time).
+- Check that the worker's inventory contains enough transport-belts for the
+  route length (estimate: Manhattan distance between the two port positions).
+
 ## The four-field rule
 
 - `placements` and `connections` describe geometry.
 - `expected_throughput` is the rate this plan should deliver of the target
   item. Compute it from the chosen modules' port throughputs, not by
   guessing.
-## Reference: a valid `plan.yaml`
+## Reference: valid `plan.yaml` shapes
 
-The following is the literal shape the validator accepts. Match it.
+Single module (no connections):
 
 ```yaml
 epoch: e1-first-coal
-
 placements:
   - id: p0
     module: coal-burner-cell
     anchor: { x: -48, y: -85 }
     direction: north
-
 connections: []
-
 expected_throughput: 0.18
-
 scaling_note: Single module exceeds the 0.10 coal/s target by 80%; one placement is sufficient.
+```
+
+Two modules with a belt connection:
+
+```yaml
+epoch: e9-coal-feeds-iron
+placements:
+  - id: p0
+    module: coal-burner-cell
+    anchor: { x: -48, y: -83 }
+    direction: north
+  - id: p1
+    module: iron-smelt-line
+    anchor: { x: -7, y: -43 }
+    direction: north
+connections:
+  - from: "p0.coal_belt"
+    to:   "p1.coal_in"
+    required_throughput: 0.18
+expected_throughput: 0.20
+scaling_note: One iron-smelt-line delivers 0.20 plate/s, well above the 0.05 threshold.
 ```
 
 ## When to use `extra:`

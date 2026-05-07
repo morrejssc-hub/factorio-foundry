@@ -11,6 +11,7 @@ import { mkdir, copyFile, readFile, writeFile, readdir, stat } from "node:fs/pro
 import { join, resolve } from "node:path";
 import { piInvoke } from "../pi-invoke.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
+import { DIRECTION_NAMES } from "../geometry/schema.js";
 
 async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
   const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
@@ -118,6 +119,165 @@ async function repairWithPi({ config, epoch, plan, placement, error, outDir, log
   return result;
 }
 
+// Rotate a canonical (north-orientation) rel_pos by the placement direction.
+// Screen coordinates: x right = east, y down = south.
+//   North: identity
+//   East  (90° CW): (dx, dy) → (-dy,  dx)
+//   South (180°):   (dx, dy) → (-dx, -dy)
+//   West  (270° CW): (dx, dy) → ( dy, -dx)
+function rotateRelPos(dx, dy, direction) {
+  switch ((direction || "north").toLowerCase()) {
+    case "east":  return { x: -dy,  y:  dx };
+    case "south": return { x: -dx,  y: -dy };
+    case "west":  return { x:  dy,  y: -dx };
+    default:      return { x:  dx,  y:  dy }; // north
+  }
+}
+
+// Resolve a port's world position for a given placement.
+// Returns null if the port name is not found in the module.
+function resolvePortWorldPos(placement, module, portName) {
+  const port = [...(module.inputs || []), ...(module.outputs || [])].find((p) => p.name === portName);
+  if (!port) return null;
+  const [dx, dy] = port.rel_pos;
+  const rotated = rotateRelPos(dx, dy, placement.direction);
+  return { x: placement.anchor.x + rotated.x, y: placement.anchor.y + rotated.y };
+}
+
+// 2x2 entity types whose center is integer (tile covers center-1 to center).
+const TWO_BY_TWO_ENTITIES = new Set(["burner-mining-drill", "stone-furnace"]);
+
+// Build a list of occupied tiles from actual blueprint entity positions.
+// Using entity tiles (not the broad footprint bbox) lets the A* router find
+// exit paths through gaps between entities, e.g. south of a belt stub.
+// routeBelt automatically removes start/goal from the set, so port tiles
+// are safe to include here.
+async function buildOccupiedTiles(plan, modules, rootDir) {
+  const tiles = [];
+  for (const p of (plan.placements || [])) {
+    const mod = modules.get(p.module);
+    if (!mod) continue;
+    let bpPath;
+    try {
+      bpPath = mod._staged && mod._stagedBlueprintPath
+        ? mod._stagedBlueprintPath
+        : resolve(rootDir, mod.realization.blueprint);
+      const bp = JSON.parse(await readFile(bpPath, "utf8"));
+      for (const entity of (bp.entities || [])) {
+        const wx = p.anchor.x + entity.dx;
+        const wy = p.anchor.y + entity.dy;
+        if (TWO_BY_TWO_ENTITIES.has(entity.item)) {
+          const cx = Math.round(wx), cy = Math.round(wy);
+          tiles.push({ x: cx - 1, y: cy - 1 }, { x: cx, y: cy - 1 },
+                     { x: cx - 1, y: cy   }, { x: cx, y: cy   });
+        } else {
+          tiles.push({ x: Math.floor(wx), y: Math.floor(wy) });
+        }
+      }
+    } catch { /* skip unreadable blueprints */ }
+  }
+  return tiles;
+}
+
+// Wire inter-module connections declared in plan.connections.
+// Each connection uses "placementId.portName" references:
+//   { from: "p0.coal_belt", to: "p1.coal_in", required_throughput: 0.18 }
+// Connections without a dot (e.g. {from: "p0", to: "p1"}) are skipped —
+// they are informational-only annotations.
+async function routeConnections({ config, plan, modules, log }) {
+  const placementById = new Map(plan.placements.map((p) => [p.id, p]));
+  const occupied = await buildOccupiedTiles(plan, modules, config.rootDir);
+  const connections = [];
+
+  for (const conn of (plan.connections || [])) {
+    const fromStr = conn.from || "";
+    const toStr   = conn.to   || "";
+    if (!fromStr.includes(".") || !toStr.includes(".")) continue;
+
+    const [fromId, fromPort] = fromStr.split(".", 2);
+    const [toId,   toPort]   = toStr.split(".", 2);
+
+    const fromPlacement = placementById.get(fromId);
+    const toPlacement   = placementById.get(toId);
+    if (!fromPlacement || !toPlacement) {
+      log(`[execute][connect] skipping ${fromStr}→${toStr}: unknown placement id`);
+      continue;
+    }
+
+    const fromModule = modules.get(fromPlacement.module);
+    const toModule   = modules.get(toPlacement.module);
+    if (!fromModule || !toModule) {
+      log(`[execute][connect] skipping ${fromStr}→${toStr}: module not found`);
+      continue;
+    }
+
+    const fromPos = resolvePortWorldPos(fromPlacement, fromModule, fromPort);
+    const toPos   = resolvePortWorldPos(toPlacement,   toModule,   toPort);
+    if (!fromPos || !toPos) {
+      log(`[execute][connect] skipping ${fromStr}→${toStr}: port not found (from=${!!fromPos} to=${!!toPos})`);
+      continue;
+    }
+
+    log(`[execute][connect] ${fromStr} (${fromPos.x},${fromPos.y}) → ${toStr} (${toPos.x},${toPos.y})`);
+    try {
+      const routeResult = await postAction(config, {
+        action: "route_belt",
+        from:     fromPos,
+        to:       toPos,
+        occupied,
+      }, { timeoutMs: 60_000 });
+
+      if (!routeResult.ok) {
+        throw new Error(`route_belt failed: ${routeResult.reason || routeResult.code || "unknown"}`);
+      }
+
+      log(`[execute][connect] route ok, ${routeResult.length} belts`);
+
+      // Exclude entities whose tile is already occupied by a module blueprint
+      // entity (e.g. belt stubs at port positions). Module belts already serve
+      // as connectors; placing a second belt on the same tile would fail.
+      const occupiedSet = new Set(occupied.map(t => `${t.x},${t.y}`));
+      const routeEntities = routeResult.entities.filter(
+        (e) => !occupiedSet.has(`${Math.floor(e.pose.center.x)},${Math.floor(e.pose.center.y)}`),
+      );
+      log(`[execute][connect] placing ${routeEntities.length} new belts (${routeResult.length - routeEntities.length} skipped, already placed)`);
+
+      const bpEntities = routeEntities.map((e, i) => ({
+        key: `belt_${i}`,
+        item: e.prototype,
+        dx:   e.pose.center.x,
+        dy:   e.pose.center.y,
+        direction: DIRECTION_NAMES[e.pose.direction] || "north",
+      }));
+
+      if (bpEntities.length === 0) {
+        log(`[execute][connect] ${fromStr}→${toStr}: all route tiles occupied, no new belts to place`);
+        connections.push({ from: fromStr, to: toStr, ok: true, length: 0 });
+        continue;
+      }
+
+      const inlineBp = { version: 1, name: `conn_${fromStr}_${toStr}`, entities: bpEntities, fuel: [] };
+      const placeResult = await executeBlueprint({
+        config,
+        blueprint: inlineBp,
+        anchor: { x: 0, y: 0 },
+        direction: "north",
+        dryRun: false,
+      });
+
+      const ok = placeResult?.ok ?? true;
+      log(`[execute][connect] placed ${fromStr}→${toStr}: ok=${ok}`);
+      connections.push({ from: fromStr, to: toStr, ok, length: routeResult.length });
+    } catch (error) {
+      log(`[execute][connect] ${fromStr}→${toStr} FAILED: ${error.message}`);
+      connections.push({ from: fromStr, to: toStr, ok: false, error: error.message });
+      throw new Error(`connection ${fromStr}→${toStr} failed: ${error.message}`);
+    }
+  }
+
+  return connections;
+}
+
 async function findNewestSave(savesDir) {
   const entries = await readdir(savesDir).catch(() => []);
   let latest = null;
@@ -165,6 +325,8 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
     }
   }
 
+  const connectionResults = await routeConnections({ config, plan, modules, log });
+
   log(`[execute] saving game…`);
   await postAction(config, { action: "save" }, { timeoutMs: 60_000 });
   const newest = await findNewestSave(config.savesDir);
@@ -174,6 +336,7 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
   await writeFile(join(outDir, "execute.json"), JSON.stringify({
     ok: true,
     perPlacement,
+    connections: connectionResults,
     save: savePathOut,
   }, null, 2), "utf8");
   return { savePath: savePathOut, perPlacement };

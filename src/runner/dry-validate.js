@@ -61,19 +61,39 @@ function checkPlacements(plan, modules) {
   return { errors, placed };
 }
 
+// Parse a connection endpoint from either the string "placementId.portName"
+// format or the legacy object {placement, port} format.
+function parseEndpoint(raw) {
+  if (typeof raw === "string") {
+    const dot = raw.indexOf(".");
+    if (dot > 0) return { placement: raw.slice(0, dot), port: raw.slice(dot + 1) };
+    return { placement: raw, port: null };
+  }
+  if (raw && typeof raw === "object") return { placement: raw.placement, port: raw.port };
+  return { placement: undefined, port: undefined };
+}
+
 function checkConnections(plan, placedById, modules) {
   const errors = [];
   for (const [i, c] of (plan.connections || []).entries()) {
-    const fromPlacement = placedById.get(c.from?.placement);
-    const toPlacement = placedById.get(c.to?.placement);
-    if (!fromPlacement) errors.push(`connections[${i}].from.placement '${c.from?.placement}' not found`);
-    if (!toPlacement) errors.push(`connections[${i}].to.placement '${c.to?.placement}' not found`);
+    const from = parseEndpoint(c.from);
+    const to   = parseEndpoint(c.to);
+
+    // Connections without a port reference are informational-only; skip checks.
+    if (!from.port && !to.port) continue;
+
+    const fromPlacement = placedById.get(from.placement);
+    const toPlacement   = placedById.get(to.placement);
+    if (!fromPlacement) errors.push(`connections[${i}].from placement '${from.placement}' not found`);
+    if (!toPlacement)   errors.push(`connections[${i}].to placement '${to.placement}' not found`);
     if (!fromPlacement || !toPlacement) continue;
-    const fromPort = findPort(fromPlacement.module, c.from.port);
-    const toPort = findPort(toPlacement.module, c.to.port);
-    if (!fromPort) errors.push(`connections[${i}].from.port '${c.from.port}' not on module ${fromPlacement.module.id}`);
-    if (!toPort) errors.push(`connections[${i}].to.port '${c.to.port}' not on module ${toPlacement.module.id}`);
+
+    const fromPort = findPort(fromPlacement.module, from.port);
+    const toPort   = findPort(toPlacement.module,   to.port);
+    if (!fromPort) errors.push(`connections[${i}].from port '${from.port}' not on module ${fromPlacement.module.id}`);
+    if (!toPort)   errors.push(`connections[${i}].to port '${to.port}' not on module ${toPlacement.module.id}`);
     if (!fromPort || !toPort) continue;
+
     if (fromPort.kind !== toPort.kind) {
       errors.push(`connections[${i}]: kind mismatch (${fromPort.kind} → ${toPort.kind})`);
     }
