@@ -149,10 +149,13 @@ async function validateStagedModules(stagedDir, expectedIds) {
  *                  failed; absent on the first attempt.
  * @returns {Promise<{planPath: string, plan: object, raw: object, authored: object[]}>}
  */
-export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir, previousAttempts = [] }) {
+export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir, previousAttempts = [], historyPath = null }) {
   await mkdir(outDir, { recursive: true });
   await copyFile(join(probeDir, "state.yaml"), join(outDir, "state.yaml"));
   await copyFile(epoch._path, join(outDir, "epoch.yaml"));
+  if (historyPath) {
+    await copyFile(historyPath, join(outDir, "designer-history.yaml"));
+  }
   // Surface the lib/ tree read-only inside the design cwd so the agent can
   // grep modules and read blueprints without being able to escape upward.
   await ensureSymlink(config.libDir, join(outDir, "lib"));
@@ -232,7 +235,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `      direction: <north|east|south|west>    # lowercase only`,
     `  connections: []                           # use [] if single placement`,
     `  expected_throughput: <number>             # items/s of target item`,
-    `  why_not_replicate: <one-sentence string>`,
+    `  scaling_note: <one-sentence string>`,
     ``,
     `You are NOT writing a runbook. Do NOT add: id (top-level), created,`,
     `steps, kind, action, depends_on, formula, assert, entities, risks,`,
@@ -248,45 +251,14 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
   if (previousAttempts.length > 0) {
     userMessageLines.push(
       ``,
-      `--- PRIOR FAILED ATTEMPTS IN THIS RUN ---`,
-      `This is recovery attempt ${previousAttempts.length + 1}. Earlier attempts`,
-      `produced output that audit (or a phase before it) rejected. Use these`,
-      `failures as constraints — do NOT repeat the same anchor / module / `,
-      `geometry that already failed.`,
-      ``,
-    );
-    for (const a of previousAttempts) {
-      userMessageLines.push(`Attempt ${a.attempt}:`);
-      if (a.error) {
-        userMessageLines.push(`  failed before audit with: ${a.error}`);
-      }
-      if (a.plan) {
-        const placements = (a.plan.placements || []).map((p) =>
-          `${p.module}@(${p.anchor?.x},${p.anchor?.y}) dir=${p.direction}`).join("; ");
-        userMessageLines.push(`  plan placements: ${placements}`);
-      }
-      if (a.verdict) {
-        userMessageLines.push(
-          `  audit: pass=${a.verdict.pass} measured=${a.verdict.measured.toFixed?.(4) ?? a.verdict.measured}` +
-          ` threshold=${a.verdict.threshold} item=${a.verdict.item}` +
-          ` produced_delta=${a.verdict.produced_delta} window_s=${a.verdict.seconds_actual?.toFixed?.(1) ?? "?"}`,
-        );
-      }
-      if (a.authored && a.authored.length) {
-        userMessageLines.push(`  authored modules: ${a.authored.map((x) => x.id).join(", ")}`);
-      }
-    }
-    userMessageLines.push(
-      ``,
-      `Make a substantively different choice on this attempt. Common levers:`,
-      `  - different anchor (further from previous, or facing a different`,
-      `    direction so footprint covers more of the resource patch)`,
-      `  - different module from allowed_modules`,
-      `  - if authoring: revisit blueprint geometry — drill drop tiles must`,
-      `    land on belts (or directly into a furnace), inserter pickup tiles`,
-      `    must overlap a belt or chest, fuel chains must close`,
-      ``,
-      `--- END PRIOR ATTEMPTS ---`,
+      `--- TASK HISTORY ---`,
+      `This is attempt ${previousAttempts.length + 1}. Read \`designer-history.yaml\``,
+      `in your working directory — it contains every prior attempt's placements,`,
+      `expected_throughput, scaling_note, and audit result (measured vs threshold).`,
+      `Use this history to reason about what strategy to change, not just which`,
+      `anchor to move. Consider whether the throughput gap requires a different`,
+      `number of placements, not just a different position.`,
+      `--- END TASK HISTORY ---`,
     );
   }
   const userMessage = userMessageLines.join("\n");
@@ -309,100 +281,102 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
   // summary tool can highlight retried recovery attempts vs first tries.
   const trace = newTrace("design", { previous_attempts: previousAttempts.length });
 
-  // First attempt.
-  const result = await piInvoke({ ...piOpts, prompt: userMessage });
-  addPiCall(trace, result);
+  let result, text, parsed, validation, errors, authored = [];
+  try {
+    // First attempt.
+    result = await piInvoke({ ...piOpts, prompt: userMessage });
+    addPiCall(trace, result);
 
-  // Hard verification of the architectural invariant: design phase stdout
-  // must contain zero factorio_action / factorio_read tool invocations.
-  // This check applies to the FIRST attempt (it's an architectural property,
-  // not a schema property). Retries also forbid these tools because they're
-  // not in the tool allowlist anyway.
-  for (const pattern of FORBIDDEN_TOOL_PATTERNS) {
-    if (pattern.test(result.stdout)) {
-      throw new Error(
-        `design phase violated tool boundary: stdout contains '${pattern}' — `
-        + `the LLM tried to invoke a Factorio world tool. This is the bug `
-        + `the architecture is supposed to prevent.`,
-      );
+    // Hard verification of the architectural invariant: design phase stdout
+    // must contain zero factorio_action / factorio_read tool invocations.
+    // This check applies to the FIRST attempt (it's an architectural property,
+    // not a schema property). Retries also forbid these tools because they're
+    // not in the tool allowlist anyway.
+    for (const pattern of FORBIDDEN_TOOL_PATTERNS) {
+      if (pattern.test(result.stdout)) {
+        throw new Error(
+          `design phase violated tool boundary: stdout contains '${pattern}' — `
+          + `the LLM tried to invoke a Factorio world tool. This is the bug `
+          + `the architecture is supposed to prevent.`,
+        );
+      }
     }
-  }
-
-  let text = await readFile(planPath, "utf8").catch(() => null);
-  let parsed = text ? parseYaml(text) : null;
-  let validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                          : { effective: null, errors: ["plan.yaml not produced"], warnings: [], unwrapped: false };
-  let errors = validation.errors;
-  for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
-  if (validation.effective) parsed = validation.effective;
-
-  // If module authoring was required, validate the staged artefacts. Errors
-  // here join the plan errors so retry feedback covers both at once.
-  let authored = [];
-  if (mustAuthorIds.length > 0) {
-    const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
-    authored = stagedResult.authored;
-    errors = [...errors, ...stagedResult.errors];
-  }
-
-  // One retry with error feedback (parallel to probe.js). If schema fails,
-  // hand the model the validator's specific complaints + its previous output
-  // so it can correct rather than re-improvise from scratch.
-  if (errors.length) {
-    const previousYaml = text ?? "(no plan.yaml was written)";
-    const errorList = errors.map((e) => `  - ${e}`).join("\n");
-    const retryMessage = [
-      `Your previous Design phase output failed schema validation.`,
-      ``,
-      `Errors from the deterministic validator:`,
-      errorList,
-      ``,
-      `Your previous plan.yaml content (truncated to 4000 chars):`,
-      "```yaml",
-      previousYaml.slice(0, 4000),
-      "```",
-      ``,
-      `Re-emit a corrected plan.yaml at the bare relative path \`plan.yaml\``,
-      `(no absolute paths, no \`..\`, no subdirectories). The validator`,
-      `accepts EXACTLY these 5 top-level keys, no others:`,
-      ``,
-      `  epoch: ${epoch.id}`,
-      `  placements:`,
-      `    - id: <short string>`,
-      `      module: <one of ${(epoch.allowed_modules || []).join(", ") || "the allowed modules"}>`,
-      `      anchor: { x: <number>, y: <number> }`,
-      `      direction: <north|east|south|west>`,
-      `  connections: []`,
-      `  expected_throughput: <number>`,
-      `  why_not_replicate: <one-sentence string>`,
-      ``,
-      `Do NOT add: steps, entities, risks, success_criteria, kind, action,`,
-      `depends_on, formula, assert, version, starter_fuel, id (top-level),`,
-      `created, or any other key. You are emitting a placement spec, not a`,
-      `runbook.`,
-    ].join("\n");
-    console.log(`[design] schema validation failed; retrying with error feedback`);
-    const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
-    addPiCall(trace, retryResult);
-    trace.schema_retry = true;
 
     text = await readFile(planPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
     validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                        : { effective: null, errors: ["plan.yaml not produced on retry"], warnings: [], unwrapped: false };
+                            : { effective: null, errors: ["plan.yaml not produced"], warnings: [], unwrapped: false };
     errors = validation.errors;
-    for (const w of validation.warnings || []) console.log(`[design normalize] ${w} (retry)`);
+    for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
     if (validation.effective) parsed = validation.effective;
+
+    // If module authoring was required, validate the staged artefacts. Errors
+    // here join the plan errors so retry feedback covers both at once.
     if (mustAuthorIds.length > 0) {
       const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
       authored = stagedResult.authored;
       errors = [...errors, ...stagedResult.errors];
     }
-  }
 
-  // Persist the trace regardless of success/failure so summary tooling can
-  // observe how much was spent even on phases that ultimately threw.
-  await writePiTrace(outDir, trace);
+    // One retry with error feedback (parallel to probe.js). If schema fails,
+    // hand the model the validator's specific complaints + its previous output
+    // so it can correct rather than re-improvise from scratch.
+    if (errors.length) {
+      const previousYaml = text ?? "(no plan.yaml was written)";
+      const errorList = errors.map((e) => `  - ${e}`).join("\n");
+      const retryMessage = [
+        `Your previous Design phase output failed schema validation.`,
+        ``,
+        `Errors from the deterministic validator:`,
+        errorList,
+        ``,
+        `Your previous plan.yaml content (truncated to 4000 chars):`,
+        "```yaml",
+        previousYaml.slice(0, 4000),
+        "```",
+        ``,
+        `Re-emit a corrected plan.yaml at the bare relative path \`plan.yaml\``,
+        `(no absolute paths, no \`..\`, no subdirectories). The validator`,
+        `accepts EXACTLY these 5 top-level keys, no others:`,
+        ``,
+        `  epoch: ${epoch.id}`,
+        `  placements:`,
+        `    - id: <short string>`,
+        `      module: <one of ${(epoch.allowed_modules || []).join(", ") || "the allowed modules"}>`,
+        `      anchor: { x: <number>, y: <number> }`,
+        `      direction: <north|east|south|west>`,
+        `  connections: []`,
+        `  expected_throughput: <number>`,
+        `  scaling_note: <one-sentence string>`,
+        ``,
+        `Do NOT add: steps, entities, risks, success_criteria, kind, action,`,
+        `depends_on, formula, assert, version, starter_fuel, id (top-level),`,
+        `created, or any other key. You are emitting a placement spec, not a`,
+        `runbook.`,
+      ].join("\n");
+      console.log(`[design] schema validation failed; retrying with error feedback`);
+      const retryResult = await piInvoke({ ...piOpts, prompt: retryMessage });
+      addPiCall(trace, retryResult);
+      trace.schema_retry = true;
+
+      text = await readFile(planPath, "utf8").catch(() => null);
+      parsed = text ? parseYaml(text) : null;
+      validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                          : { effective: null, errors: ["plan.yaml not produced on retry"], warnings: [], unwrapped: false };
+      errors = validation.errors;
+      for (const w of validation.warnings || []) console.log(`[design normalize] ${w} (retry)`);
+      if (validation.effective) parsed = validation.effective;
+      if (mustAuthorIds.length > 0) {
+        const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
+        authored = stagedResult.authored;
+        errors = [...errors, ...stagedResult.errors];
+      }
+    }
+  } finally {
+    // Always persist trace so summary tooling sees actual wall time / tokens
+    // even when piInvoke throws (e.g. timeout). Non-fatal if write fails.
+    await writePiTrace(outDir, trace).catch((e) => console.log(`[design] trace write failed (non-fatal): ${e.message}`));
+  }
 
   if (!text) throw new Error(`design phase did not produce plan.yaml in ${outDir}`);
   if (errors.length) {

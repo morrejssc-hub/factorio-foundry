@@ -136,7 +136,7 @@ export const STATE_SCHEMA = {
 };
 
 export const PLAN_SCHEMA = {
-  required: ["epoch", "placements", "connections", "expected_throughput", "why_not_replicate"],
+  required: ["epoch", "placements", "connections", "expected_throughput", "scaling_note"],
   optional: { extra: {} },
   wrappers: ["plan", "design", "result", "data", "output"],
   aliases: {},

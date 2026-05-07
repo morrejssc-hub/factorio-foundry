@@ -41,7 +41,7 @@ epoch** if any are missing. Each placement is also schema-checked.
 | `placements`          | yes      | array of `{id, module, anchor: {x, y}, direction}` (one per module instance)          |
 | `connections`         | yes      | array (use `[]` if no inter-module wiring) of `{from, to, required_throughput}`       |
 | `expected_throughput` | yes      | number — items/s your plan delivers of the target item                                |
-| `why_not_replicate`   | yes      | string — one sentence justifying composition vs N copies of one module                |
+| `scaling_note`        | yes      | string — one sentence describing your scaling decision                                |
 | `extra`               | optional | open mapping — see "When to use `extra:`" below                                       |
 
 **You are NOT writing a project plan, a runbook, or a step list.** You are
@@ -54,7 +54,7 @@ place blueprints, seed fuel, wait, and audit — those are not your concern.
   `success_criteria`, `module`, `version`, `starter_fuel`, `anchor`, `id`.
   They are not consumed and a plan that has them but is missing the four
   required keys above will fail. If you have side observations or rationale
-  beyond `why_not_replicate`, put them under `extra:` (see below) — never
+  beyond `scaling_note`, put them under `extra:` (see below) — never
   at the top level.
 - **Top-level means top-level.** Do **not** wrap your output in a single
   namespacing dict like `plan:`, `design:`, `result:`, or `output:`. The
@@ -92,11 +92,6 @@ module's local frame. You must:
 - `expected_throughput` is the rate this plan should deliver of the target
   item. Compute it from the chosen modules' port throughputs, not by
   guessing.
-- `why_not_replicate` is the most important field when scaling beyond a
-  single module. If you place 4 of the same module to multiply output, your
-  reason must explain why this particular composition meets the target —
-  not just "4× one module".
-
 ## Reference: a valid `plan.yaml`
 
 The following is the literal shape the validator accepts. Match it.
@@ -114,9 +109,7 @@ connections: []
 
 expected_throughput: 0.18
 
-why_not_replicate: |
-  Single module exceeds the 0.10 coal/s target by 80%; no need for a second
-  cell. One placement keeps the plan minimal and avoids overlapping footprints.
+scaling_note: Single module exceeds the 0.10 coal/s target by 80%; one placement is sufficient.
 ```
 
 ## When to use `extra:`
@@ -216,5 +209,5 @@ must be authored. For each such id:
 
 Aim for under 60 tool calls. Most of your time should be reading the lib
 files; the actual `plan.yaml` is short. Anything you discover that isn't a
-field above belongs in `why_not_replicate` as a sentence — not as extra
+field above belongs in `scaling_note` as a sentence — not as extra
 top-level keys.

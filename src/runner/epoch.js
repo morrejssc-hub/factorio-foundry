@@ -7,7 +7,7 @@
 //     execute → audit). Operates on an input save, produces an output save.
 import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { rconExec } from "../rcon.js";
 import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
@@ -140,6 +140,13 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   const attemptRecords = [];
   let winning = null;
   let lastVerdict = null;
+  const historyPath = join(runDir, "designer-history.yaml");
+  const historyEntries = [];
+
+  async function flushHistory() {
+    await writeFile(historyPath, stringifyYaml({ attempts: historyEntries }), "utf8");
+  }
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const isMulti = maxAttempts > 1;
     const attemptDir = isMulti ? join(runDir, `attempt-${attempt}`) : runDir;
@@ -165,6 +172,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         outDir: designOut,
         stagedDir,
         previousAttempts,
+        historyPath: historyEntries.length > 0 ? historyPath : null,
       });
       log(`[epoch ${epoch.id}] attempt ${attempt}: design ok — placements=${designResult.plan.placements.length}` +
           (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
@@ -209,6 +217,23 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
           authored: designResult.authored,
         });
       }
+      historyEntries.push({
+        attempt,
+        placements: (designResult.plan.placements || []).map((p) => ({
+          module: p.module,
+          anchor: p.anchor,
+          direction: p.direction,
+        })),
+        expected_throughput: designResult.plan.expected_throughput,
+        scaling_note: designResult.plan.scaling_note,
+        audit: verdict ? {
+          pass: verdict.pass,
+          measured: verdict.measured,
+          threshold: verdict.threshold,
+          item: verdict.item,
+        } : null,
+      });
+      await flushHistory();
     } catch (error) {
       attemptError = error.message;
       log(`[epoch ${epoch.id}] attempt ${attempt} failed before audit: ${error.message}`);
@@ -218,6 +243,19 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         authored: designResult?.authored,
         error: error.message,
       });
+      historyEntries.push({
+        attempt,
+        placements: (designResult?.plan?.placements || []).map((p) => ({
+          module: p.module,
+          anchor: p.anchor,
+          direction: p.direction,
+        })),
+        expected_throughput: designResult?.plan?.expected_throughput ?? null,
+        scaling_note: designResult?.plan?.scaling_note ?? null,
+        audit: null,
+        error: error.message,
+      });
+      await flushHistory();
     }
 
     // Record this attempt's full disposition for run-meta. The earlier

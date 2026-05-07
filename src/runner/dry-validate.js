@@ -120,7 +120,7 @@ export async function runDryValidate({ plan, modules, outDir }) {
   // The four-field constraint that Designer prompt enforces. dry-validate
   // double-checks structurally so a violation is caught even if Designer
   // prompts get tweaked.
-  for (const required of ["placements", "expected_throughput", "why_not_replicate"]) {
+  for (const required of ["placements", "expected_throughput", "scaling_note"]) {
     if (!(required in plan)) errors.push(`plan missing required field: ${required}`);
   }
   if (!("connections" in plan)) errors.push("plan missing required field: connections (use [] for none)");
