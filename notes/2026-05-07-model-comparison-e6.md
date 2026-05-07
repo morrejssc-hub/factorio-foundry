@@ -7,12 +7,25 @@ coal/s）跑了 4 个不同的 LLM。**只有 gpt-5.5 想到"复制模块到 4 �
 都只会换 anchor**。这意味着之前 e1-e6 报告的所有"成功率"实际上是 gpt-5.5
 （通过 pi 默认 provider 静默选中）的产物，不是基础设施保证。
 
-| Model | Provider | 轨迹 | wall | tokens | pass |
-|---|---|---|---|---|---|
-| gpt-5.5 | openai-codex | 1→1→**4** | 7m | 322k | ✅ |
-| qwen3.6-plus | bailian (百炼) | 1→1→1 | 1m44s | 72k | ❌ |
-| glm-5 | bailian (百炼) | 1→1→1 | 3m13s | 73k | ❌ |
-| qwen3-6-27b | local llama-api (192.168.10.181:8002) | 1→💥→💥 | 5m11s + 2×timeout | 0\* | ❌ |
+| Model | Provider | 轨迹 | wall | tokens | pass | 失败模式 |
+|---|---|---|---|---|---|---|
+| gpt-5.5 | openai-codex | 1→1→**4** | 7m | 322k | ✅ | — |
+| qwen3.6-plus | bailian (百炼) | 1→1→1 | 1m44s | 72k | ❌ | 只换 anchor |
+| glm-5 | bailian (百炼) | 1→1→1 | 3m13s | 73k | ❌ | 只换 anchor |
+| qwen3-6-27b | local llama-api | 1→💥→💥 | 5m11s + 2×timeout | 0\* | ❌ | 超时 |
+| deepseek-v4-pro | DeepSeek | 1→1→1† | — | — | ❌ | repair pi 清岩，但仍只 1 placement |
+| gemini-3.1-pro-preview | undy | 1→1→1‡ | — | — | ❌ | 误读 meta：以为阈值故意不可达 |
+
+† attempt 3 repair pi 主动分析障碍（大岩石 blocking belt），提议并执行
+`mine-simple-entity` 清岩后成功 execute，但 measured=0。策略层面仍是"换
+anchor"而非"扩数量"。
+
+‡ Gemini 的失败模式与其他不同：它读出了 `why_not_replicate` 字段和
+epoch 名称（"recovery-test"），推断"阈值是 **故意** 设成不可达的"，因此
+显式决定不 scale up（`why_not_replicate: "Only one placement is requested
+for this test"`）。这是理解层面的误判——它把测试框架的 meta 语义当成了
+设计目标，而不是执行目标。attempt 3 还退回到 (0,0)，没有利用 attempt 2
+已找到的可用 anchor。
 
 \* 本地 server 不在 stream 里发 usage chunk，pi 拿不到 token 数。
 
@@ -167,14 +180,37 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
 
 ## 后续 TODO（本报告产生的）
 
-- [ ] **修 trace 落盘 bug**（design.js + probe.js）：用 try/finally 保证
+- [x] **修 trace 落盘 bug**（design.js + probe.js）：用 try/finally 保证
   writePiTrace 在异常路径也执行
-- [ ] e1-e5 cross-model 重测：用至少 qwen3.6-plus + glm-5 重跑，看哪些
-  epoch 真能跨模型通过
+- [x] **修 pi-invoke.js stdout OOM bug**：qwen3.6-plus high-thinking 产出量
+  很大，`stdout += text` 会触发 `RangeError: Invalid string length`。已在
+  `pi-invoke.js` 加 8MB cap（`stdout` 只用于 design.js forbidden-tool 检查，
+  早期输出即可覆盖，cap 安全）
+- [x] e1-e5 cross-model 重测（qwen3.6-plus）：**全部 5/5 通过**，见下表
 - [ ] design prompt 里的"levers"考虑加更明显的 "scale up" 提示，让较弱
   模型也能想到复制
 - [ ] 考虑 `epoch.yaml` 加 `model_min_capability` 字段，标记某 epoch 已
   在哪些模型上验证过通过
+
+## e1-e5 cross-model 重测结果 — qwen3.6-plus (2026-05-07)
+
+| epoch | pass | measured | threshold | item | attempts |
+|---|---|---|---|---|---|
+| e1-first-coal | ✅ | 0.250 | 0.10 | coal | 1 |
+| e2-first-iron | ✅ | 0.233 | 0.05 | iron-plate | 1 |
+| e3-first-copper | ✅ | 0.233 | 0.05 | copper-plate | 1 |
+| e4-coal-pair | ✅ | 0.500 | 0.30 | coal | 1 |
+| e5-coal-cluster-cell | ✅ | 0.500 | 0.40 | coal | 1 |
+
+结论：e1-e5 这五个 epoch 确实是基础设施层面可重现的能力，不依赖 gpt-5.5
+的特殊智能。qwen3.6-plus 全部一次通过。e6 仍然是 gpt-5.5 孤例。
+
+中途发现并修复的 bug（与本次重测直接相关）：
+1. **stdout OOM**（pi-invoke.js）：qwen3.6-plus 在 e2 probe 期间 stdout 超出
+   JS 字符串上限，Node.js 进程崩溃，级联导致 e3 Factorio server 状态异常。
+   加 8MB cap 后 e2/e3 顺利通过。
+2. **trace 落盘 bug**（design.js + probe.js）：piInvoke timeout/crash 时
+   writePiTrace 跳过，已用 try/finally 修复。
 
 ## 不在范围
 
@@ -195,3 +231,5 @@ previousAttempts 反馈让 prompt 更长，更慢。现有 600s budget 不够。
 - qwen3.6-plus: `plans/e6-recovery-test-2026-05-07T01-33-32-071Z/`
 - glm-5: `plans/e6-recovery-test-2026-05-07T02-25-XX-XXXZ/`（最新的中间一个）
 - qwen3-6-27b 本地: `plans/e6-recovery-test-2026-05-07T02-37-57-506Z/`
+- deepseek-v4-pro: `plans/e6-recovery-test-2026-05-07T04-45-52-190Z/`
+- gemini-3.1-pro-preview (undy): `plans/e6-recovery-test-2026-05-07T05-07-33-630Z/`
