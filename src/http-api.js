@@ -64,6 +64,15 @@ export function createApi(config, factorio, apiDocs, wiki) {
         return send(res, 200, { ok: true, result });
       }
 
+      // foundry_probe: accepts raw Lua content from the designer pi extension.
+      // Designer resolves script paths in its own cwd; server only validates + runs.
+      if (req.method === "POST" && url.pathname === "/tool/foundry_probe") {
+        const { lua, params } = await readJson(req);
+        if (!lua || typeof lua !== "string") return send(res, 400, { ok: false, error: "lua string required" });
+        const result = await factorio.runProbeScript(lua, params || {});
+        return send(res, 200, { ok: true, result });
+      }
+
       return send(res, 404, { ok: false, error: "not found" });
     } catch (error) {
       return send(res, 500, { ok: false, error: error.message });

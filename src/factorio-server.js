@@ -840,6 +840,16 @@ print_inventory(inv)
     };
   }
 
+  // Like runReadScript but accepts raw Lua content instead of a workspace path.
+  // Used by the foundry-probe pi extension so the designer can run scripts from
+  // its own cwd (lib/probes/ symlink + any script it writes itself).
+  async runProbeScript(lua, params = {}) {
+    validateReadOnlyLua(lua, "<designer-probe>");
+    const command = buildLuaCommand("designer-probe.lua", lua, params);
+    const output = await this.rcon(command, 60000);
+    return { output: output || "(empty response)", readonly: true };
+  }
+
   async validatePlacement(entities) {
     const { output } = await this.runReadScript("lib/validate_placement.lua", { entities });
     return parseJsonObjectOutput(output, "validate_placement");
