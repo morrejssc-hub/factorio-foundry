@@ -16,6 +16,10 @@ import { runDryValidate } from "./dry-validate.js";
 import { runExecute } from "./execute.js";
 import { runAudit } from "./audit.js";
 import { writeSummary } from "./run-summary.js";
+import {
+  candidateId, candidateDir, epochSaveDir, runSavePath,
+  winnerSavePath, resolveInputSave, promoteWinner, writeManifest,
+} from "./run-layout.js";
 
 export async function loadEpoch(epochsDir, epochId) {
   const path = resolve(epochsDir, `${epochId}.yaml`);
@@ -110,15 +114,18 @@ async function runBootstrapEpoch({ config, factorio, epoch, log }) {
 
 async function runCompositionEpoch({ config, factorio, epoch, log }) {
   if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
-  const inputSave = resolve(config.rootDir, epoch.input_save);
-  const outputSave = resolve(config.rootDir, epoch.output_save);
+  const inputSave = resolveInputSave(config, epoch.input_save);
   const maxAttempts = Math.max(1, Number(epoch.recovery_attempts) || 1);
   log(`[epoch ${epoch.id}] starting from save ${inputSave}` + (maxAttempts > 1 ? ` (recovery_attempts=${maxAttempts})` : ""));
   await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
 
-  const runId = new Date().toISOString().replace(/[:.]/g, "-");
-  const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runId}`);
+  const runTs = new Date().toISOString().replace(/[:.]/g, "-");
+  const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
   await mkdir(runDir, { recursive: true });
+
+  const saveDir = epochSaveDir(config, epoch.id);
+  await mkdir(saveDir, { recursive: true });
+  const winnerPath = winnerSavePath(saveDir);
 
   // Probe runs once per run regardless of recovery_attempts. The world
   // resets to input_save between attempts so the same probe output remains
@@ -148,12 +155,13 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const isMulti = maxAttempts > 1;
-    const attemptDir = isMulti ? join(runDir, `attempt-${attempt}`) : runDir;
-    const designOut = isMulti ? join(attemptDir, "design") : join(runDir, "design");
-    const stagedDir = isMulti ? join(attemptDir, "staged-modules") : join(runDir, "staged-modules");
-    const executeOut = isMulti ? join(attemptDir, "execute") : join(runDir, "execute");
-    if (isMulti) await mkdir(attemptDir, { recursive: true });
+    const cid = candidateId(attempt - 1);
+    const candDir = candidateDir(runDir, cid);
+    await mkdir(candDir, { recursive: true });
+    const designOut = join(candDir, "design");
+    const stagedDir = join(candDir, "staged-modules");
+    const executeOut = join(candDir, "execute");
+    const candidateSavePath = runSavePath(saveDir, runTs, cid);
 
     if (attempt > 1) {
       log(`[epoch ${epoch.id}] retry attempt ${attempt}/${maxAttempts} — resetting world to input_save`);
@@ -182,7 +190,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       dryResult = await runDryValidate({
         plan: designResult.plan,
         modules,
-        outDir: attemptDir,
+        outDir: candDir,
       });
       if (!dryResult.ok) throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
       log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
@@ -194,7 +202,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         plan: designResult.plan,
         modules,
         outDir: executeOut,
-        savePathOut: outputSave,
+        savePathOut: candidateSavePath,
       });
       log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
 
@@ -202,7 +210,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       verdict = await runAudit({
         config,
         targetMetric: epoch.target_metric,
-        outDir: attemptDir,
+        outDir: candDir,
       });
       log(`[epoch ${epoch.id}] attempt ${attempt}: audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
       lastVerdict = verdict;
@@ -264,9 +272,11 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     // exactly which phase failed.
     attemptRecords.push({
       attempt,
-      attemptDir,
+      candidate: cid,
+      candidateDir: candDir,
       designOut,
       executeOut,
+      candidateSavePath,
       placements: designResult?.plan?.placements?.length ?? null,
       authored: designResult?.authored?.map((a) => a.id) ?? [],
       dry_validate: dryResult ? { ok: dryResult.ok, errors: dryResult.errors ?? [] } : null,
@@ -288,7 +298,21 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   const actualAttempts = winning ? winning.attempt : attemptRecords.length;
 
   if (winning) {
-    const { designResult, verdict } = winning;
+    const { designResult, verdict, exResult: winExResult } = winning;
+    await promoteWinner(winExResult.savePath, winnerPath);
+    log(`[epoch ${epoch.id}] winner promoted → ${winnerPath}`);
+    await writeManifest(runDir, {
+      epoch: epoch.id,
+      run_ts: runTs,
+      winner_candidate: candidateId(winning.attempt - 1),
+      winner_save: winnerPath,
+      candidates: attemptRecords.map((r) => ({
+        candidate: r.candidate,
+        save: r.candidateSavePath,
+        audit: r.audit,
+        error: r.error ?? null,
+      })),
+    });
     if (designResult.authored?.length) {
       await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
     }
@@ -301,7 +325,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   }
 
   await writeRunMeta({
-    runDir, epoch, ok: !!winning, inputSave, outputSave,
+    runDir, epoch, ok: !!winning, inputSave, outputSave: winnerPath,
     maxAttempts, actualAttempts, probeCacheHit: !!probeResult.cacheHit,
     attemptRecords, lastVerdict: winning ? winning.verdict : lastVerdict,
   });
