@@ -88,6 +88,18 @@ export async function piInvoke(opts) {
   // routers like bailian come from `packages` in `.pi/agent/settings.json`,
   // which IS walked up from cwd.
   for (const ext of extensions) args.push("-e", resolve(ext));
+  // FOUNDRY_PI_EXTENSIONS: per-machine extension injection channel for
+  // experiments. Use this when the extension lives at an absolute path
+  // tied to the operator's machine (e.g. ~/factorio-agent/.pi/extensions/
+  // local-openai-provider for trying a local llama.cpp endpoint). Use the
+  // `packages` list in `.pi/agent/settings.json` instead when the
+  // extension is portable (npm:foo or a path relative to the repo).
+  // Comma-separated absolute paths.
+  const extraExt = (process.env.FOUNDRY_PI_EXTENSIONS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const ext of extraExt) args.push("-e", resolve(ext));
   if (tools && tools.length) args.push("--tools", tools.join(","));
   // FOUNDRY_PI_MODEL / FOUNDRY_PI_PROVIDER let an operator pin the LLM for
   // every phase from one place (e.g. `FOUNDRY_PI_MODEL=glm-5 npm run epoch
