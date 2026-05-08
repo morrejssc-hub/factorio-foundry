@@ -8,4 +8,5 @@ runtime/
 runtime-slot*/
 *.log
 .DS_Store
+.claude/
 factorio-headless_linux_*.tar.xz
