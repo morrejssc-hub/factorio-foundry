@@ -9,21 +9,24 @@
       "item": "burner-mining-drill",
       "dx": 0,
       "dy": 0,
-      "direction": "east"
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 10 } }
     },
     {
       "key": "furnace",
       "item": "stone-furnace",
       "dx": 2,
       "dy": 0,
-      "direction": "north"
+      "direction": "north",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
     },
     {
       "key": "output_inserter",
       "item": "burner-inserter",
       "dx": 3.5,
       "dy": 0.5,
-      "direction": "west"
+      "direction": "west",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
     },
     {
       "key": "iron_chest",
@@ -65,22 +68,17 @@
       "item": "burner-inserter",
       "dx": 0.5,
       "dy": 1.5,
-      "direction": "south"
+      "direction": "south",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
     },
     {
       "key": "furnace_fuel_inserter",
       "item": "burner-inserter",
       "dx": 2.5,
       "dy": 1.5,
-      "direction": "south"
+      "direction": "south",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
     }
-  ],
-  "fuel": [
-    { "target": "drill",               "item": "coal", "count": 10 },
-    { "target": "furnace",             "item": "coal", "count": 5  },
-    { "target": "output_inserter",     "item": "coal", "count": 5  },
-    { "target": "drill_fuel_inserter", "item": "coal", "count": 5  },
-    { "target": "furnace_fuel_inserter","item": "coal", "count": 5  }
   ],
   "ports": {
     "coal_in": {

@@ -9,14 +9,16 @@
       "item": "burner-mining-drill",
       "dx": 0,
       "dy": 0,
-      "direction": "east"
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 4 } }
     },
     {
       "key": "drill_north",
       "item": "burner-mining-drill",
       "dx": 0,
       "dy": -2,
-      "direction": "east"
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 4 } }
     },
     {
       "key": "north_belt_out",
@@ -65,21 +67,24 @@
       "item": "burner-inserter",
       "dx": 1.5,
       "dy": -1.5,
-      "direction": "east"
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 1 } }
     },
     {
       "key": "fuel_inserter_south",
       "item": "burner-inserter",
       "dx": 1.5,
       "dy": 0.5,
-      "direction": "east"
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 1 } }
     },
     {
       "key": "output_inserter",
       "item": "burner-inserter",
       "dx": 3.5,
       "dy": 0.5,
-      "direction": "west"
+      "direction": "west",
+      "settings": { "fuel": { "item": "coal", "count": 1 } }
     },
     {
       "key": "coal_chest",
@@ -87,33 +92,6 @@
       "dx": 4.5,
       "dy": 0.5,
       "direction": "north"
-    }
-  ],
-  "fuel": [
-    {
-      "target": "drill_south",
-      "item": "coal",
-      "count": 4
-    },
-    {
-      "target": "drill_north",
-      "item": "coal",
-      "count": 4
-    },
-    {
-      "target": "fuel_inserter_south",
-      "item": "coal",
-      "count": 1
-    },
-    {
-      "target": "fuel_inserter_north",
-      "item": "coal",
-      "count": 1
-    },
-    {
-      "target": "output_inserter",
-      "item": "coal",
-      "count": 1
     }
   ],
   "ports": {

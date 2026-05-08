@@ -107,8 +107,57 @@ const PLACEABLE_ITEMS = new Map([
   ["pipe", "pipe"],
   ["solar-panel", "solar-panel"],
   ["accumulator", "accumulator"],
+  ["assembling-machine-1", "assembling-machine-1"],
 ]);
 const ENTITY_TO_ITEM = new Map([...PLACEABLE_ITEMS.entries()].map(([item, entity]) => [entity, item]));
+
+// Per-entity runtime settings applied after placement. Each setting key
+// names the action; the value is the per-entity item allowlist. Adding a
+// new setting kind = one entry here + a normaliser branch in
+// normaliseEntitySettings + one dispatch case in the Lua executor block.
+const SETTING_APPLICABILITY = {
+  fuel: new Set([
+    "burner-mining-drill",
+    "stone-furnace",
+    "steel-furnace",
+    "burner-inserter",
+    "boiler",
+  ]),
+  recipe: new Set([
+    "assembling-machine-1",
+  ]),
+};
+
+function normaliseEntitySettings(rawSettings, item, label) {
+  if (rawSettings == null) return null;
+  if (typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+    throw new Error(`${label}.settings must be an object`);
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(rawSettings)) {
+    const allow = SETTING_APPLICABILITY[key];
+    if (!allow) throw new Error(`${label}.settings has unknown key: ${key}`);
+    if (!allow.has(item)) {
+      throw new Error(`${label}.settings.${key} not applicable to item ${item}`);
+    }
+    if (key === "fuel") {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`${label}.settings.fuel must be an object`);
+      }
+      out.fuel = {
+        item: String(value.item || "coal"),
+        count: clampCount(value.count, 1, 1000),
+        inventory: String(value.inventory || "fuel"),
+      };
+    } else if (key === "recipe") {
+      if (typeof value !== "string" || !value) {
+        throw new Error(`${label}.settings.recipe must be a non-empty string`);
+      }
+      out.recipe = value;
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 const RECIPES = new Map([
   ["stone-furnace", { count: 1, ingredients: { stone: 5 } }],
@@ -1870,6 +1919,8 @@ rcon.print(helpers.table_to_json(result))
       if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
         throw new Error(`${label}.entities[${index}] dx/dy must be numeric`);
       }
+      const entityLabel = `${label}.entities[${index}]`;
+      const settings = normaliseEntitySettings(raw.settings, item, entityLabel);
       return {
         key,
         item,
@@ -1877,28 +1928,41 @@ rcon.print(helpers.table_to_json(result))
         dx,
         dy,
         direction: String(raw.direction || raw.dir || "north"),
+        settings,
       };
     });
-    const fuel = Array.isArray(spec.fuel) ? spec.fuel.map((raw, index) => {
-      const target = String(raw.target || raw.key || "");
-      if (!target || !keys.has(target)) {
-        throw new Error(`${label}.fuel[${index}] target must reference an entity key`);
+    if (spec.fuel !== undefined) {
+      throw new Error(`${label}.fuel is no longer supported; move per-entity fuel into entity.settings.fuel`);
+    }
+    // Flatten settings into a single ordered action list so the Lua
+    // executor can iterate once and dispatch by action.kind.
+    const settingsActions = [];
+    for (const ent of entities) {
+      if (!ent.settings) continue;
+      if (ent.settings.fuel) {
+        settingsActions.push({
+          kind: "fuel",
+          target: ent.key,
+          item: ent.settings.fuel.item,
+          count: ent.settings.fuel.count,
+          inventory: this.inventoryKind(ent.settings.fuel.inventory),
+        });
       }
-      const item = String(raw.item || "coal");
-      return {
-        target,
-        item,
-        count: clampCount(raw.count, 1, 1000),
-        inventory: this.inventoryKind(raw.inventory || "fuel"),
-      };
-    }) : [];
+      if (ent.settings.recipe) {
+        settingsActions.push({
+          kind: "recipe",
+          target: ent.key,
+          recipe: ent.settings.recipe,
+        });
+      }
+    }
     return {
       version: Number(spec.version || 1),
       name: String(spec.name || label),
       description: spec.description ? String(spec.description) : "",
       anchor: spec.anchor ? String(spec.anchor) : null,
       entities,
-      fuel,
+      settingsActions,
       assertions: Array.isArray(spec.assertions) ? spec.assertions.map((item) => String(item)) : [],
     };
   }
@@ -1938,7 +2002,8 @@ local result = {
   placement = {},
   blockedPlacements = {},
   placed = {},
-  fuelTransfers = {}
+  fuelTransfers = {},
+  recipesSet = {}
 }
 
 local function finish(ok, error_name)
@@ -1958,8 +2023,10 @@ end
 for _, entity in ipairs(blueprint.entities) do
   add_required(entity.item, 1)
 end
-for _, fuel in ipairs(blueprint.fuel or {}) do
-  add_required(fuel.item, fuel.count)
+for _, action in ipairs(blueprint.settingsActions or {}) do
+  if action.kind == "fuel" then
+    add_required(action.item, action.count)
+  end
 end
 
 for item, count in pairs(result.requiredItems) do
@@ -2059,49 +2126,66 @@ for _, entity in ipairs(blueprint.entities) do
   })
 end
 
-for _, fuel in ipairs(blueprint.fuel or {}) do
-  local target = created_by_key[fuel.target]
+for _, action in ipairs(blueprint.settingsActions or {}) do
+  local target = created_by_key[action.target]
   if not target or not target.valid then
     rollback()
-    result.failedFuelTarget = fuel.target
-    finish(false, "fuel_target_not_found")
+    result.failedSettingsTarget = action.target
+    finish(false, "settings_target_not_found")
     return
   end
-  local target_inv = entity_inventory(target, fuel.inventory)
-  if not target_inv or not target_inv.valid then
-    rollback()
-    result.failedFuelTarget = fuel.target
-    finish(false, "fuel_inventory_not_found")
-    return
+  if action.kind == "fuel" then
+    local target_inv = entity_inventory(target, action.inventory)
+    if not target_inv or not target_inv.valid then
+      rollback()
+      result.failedSettingsTarget = action.target
+      finish(false, "fuel_inventory_not_found")
+      return
+    end
+    if target_inv.get_insertable_count(action.item) < action.count then
+      rollback()
+      result.failedSettingsTarget = action.target
+      finish(false, "fuel_inventory_full")
+      return
+    end
+    if not consume_item(action.item, action.count) then
+      rollback()
+      result.failedItem = action.item
+      finish(false, "worker_remove_failed")
+      return
+    end
+    local inserted = target_inv.insert{name = action.item, count = action.count}
+    if inserted ~= action.count then
+      rollback()
+      result.failedSettingsTarget = action.target
+      result.inserted = inserted
+      finish(false, "fuel_insert_failed")
+      return
+    end
+    table.insert(result.fuelTransfers, {
+      target = action.target,
+      entity = target.name,
+      unitNumber = target.unit_number,
+      inventory = action.inventory,
+      item = action.item,
+      count = action.count
+    })
+  elseif action.kind == "recipe" then
+    local ok_set, err = pcall(function() target.set_recipe(action.recipe) end)
+    if not ok_set or target.get_recipe() == nil then
+      rollback()
+      result.failedSettingsTarget = action.target
+      result.recipeError = tostring(err)
+      finish(false, "recipe_set_failed")
+      return
+    end
+    table.insert(result.recipesSet, {
+      target = action.target,
+      entity = target.name,
+      unitNumber = target.unit_number,
+      recipe = action.recipe
+    })
   end
-  if target_inv.get_insertable_count(fuel.item) < fuel.count then
-    rollback()
-    result.failedFuelTarget = fuel.target
-    finish(false, "fuel_inventory_full")
-    return
-  end
-  if not consume_item(fuel.item, fuel.count) then
-    rollback()
-    result.failedItem = fuel.item
-    finish(false, "worker_remove_failed")
-    return
-  end
-  local inserted = target_inv.insert{name = fuel.item, count = fuel.count}
-  if inserted ~= fuel.count then
-    rollback()
-    result.failedFuelTarget = fuel.target
-    result.inserted = inserted
-    finish(false, "fuel_insert_failed")
-    return
-  end
-  table.insert(result.fuelTransfers, {
-    target = fuel.target,
-    entity = target.name,
-    unitNumber = target.unit_number,
-    inventory = fuel.inventory,
-    item = fuel.item,
-    count = fuel.count
-  })
 end
 
 finish(true, nil)

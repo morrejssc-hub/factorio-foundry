@@ -257,7 +257,7 @@ async function routeConnections({ config, plan, modules, log }) {
         continue;
       }
 
-      const inlineBp = { version: 1, name: `conn_${fromStr}_${toStr}`, entities: bpEntities, fuel: [] };
+      const inlineBp = { version: 1, name: `conn_${fromStr}_${toStr}`, entities: bpEntities };
       const placeResult = await executeBlueprint({
         config,
         blueprint: inlineBp,
