@@ -1,0 +1,8 @@
+epoch: e_test_proposal-loop
+placements:
+  - { id: p0, module: coal-burner-cell, anchor: { x: -48, y: -90 }, direction: north }
+  - { id: p1, module: far-sink, anchor: { x: 0, y: 0 }, direction: north }
+connections:
+  - { from: p0.coal_belt, to: p1.far_in, required_throughput: 0.18 }
+expected_throughput: 0.18
+scaling_note: "fixture: connection routing will fail because far_in is 2000 tiles east — A* exhausts maxIterations"

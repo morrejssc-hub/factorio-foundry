@@ -1,0 +1,6 @@
+epoch: e_test_proposal-loop
+placements:
+  - { id: p0, module: coal-burner-cell, anchor: { x: -48, y: -90 }, direction: north }
+connections: []
+expected_throughput: 0.18
+scaling_note: "fixture: clean recovery plan — single coal-burner-cell, no inter-module connection to fail on"

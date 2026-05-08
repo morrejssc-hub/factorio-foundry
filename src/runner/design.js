@@ -268,6 +268,31 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     await ensureSymlink(stagedDir, join(outDir, "staged-modules"));
   }
 
+  // Test seam: when epoch._fixture.attempts[i] is set, copy the fixture's
+  // plan.yaml + staged-modules into the design cwd and skip the LLM call.
+  // Production epochs never set this key. Used by epochs/e_test_proposal-loop.yaml
+  // to deterministically force a known-bad plan and exercise the executor
+  // proposal-loop end-to-end without depending on LLM cooperation.
+  const fixtureBase = epoch._fixture?.attempts?.[previousAttempts.length];
+  if (fixtureBase) {
+    const fixtureDir = resolve(config.rootDir, fixtureBase);
+    const planPath = join(outDir, "plan.yaml");
+    const planText = await readFile(join(fixtureDir, "plan.yaml"), "utf8");
+    await writeFile(planPath, planText, "utf8");
+    if (allowAuthor) {
+      const fixtureStaged = join(fixtureDir, "staged-modules");
+      const entries = await readdir(fixtureStaged).catch(() => []);
+      for (const e of entries) await copyFile(join(fixtureStaged, e), join(stagedDir, e));
+    }
+    const parsed = parseYaml(planText);
+    const validation = validatePlan(parsed, epoch.allowed_modules);
+    if (validation.errors.length) {
+      throw new Error(`fixture ${fixtureBase} plan invalid: ${validation.errors.join("; ")}`);
+    }
+    console.log(`[design] fixture mode: loaded ${fixtureBase} (skipping LLM)`);
+    return { planPath, plan: validation.effective, raw: { fixture: fixtureBase }, authored: [] };
+  }
+
   const systemPrompt = await readFile(resolve(config.rootDir, "prompts/design.md"), "utf8");
   const factorioApiDocsExt = resolve(config.rootDir, ".pi/extensions/factorio-api-docs/index.ts");
   const foundryReadExt     = resolve(config.rootDir, ".pi/extensions/foundry-read/index.ts");

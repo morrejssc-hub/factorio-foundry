@@ -1,0 +1,13 @@
+id: far-sink
+version: 1
+inputs:
+  - { name: far_in, side: west, rel_pos: [2000, 0], throughput: 0.18, item: coal, kind: belt }
+outputs: []
+power: { kind: none }
+footprint:
+  min: [-0.5, -0.5]
+  max: [0.5, 0.5]
+preconditions: []
+realization:
+  blueprint: lib/blueprints/far-sink.json
+audits: []

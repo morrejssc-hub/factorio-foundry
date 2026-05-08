@@ -4,6 +4,7 @@ state/saves/
 state/digests/
 state/cache/
 runtime/
+runtime-slot*/
 *.log
 .DS_Store
 factorio-headless_linux_*.tar.xz

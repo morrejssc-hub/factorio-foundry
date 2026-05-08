@@ -50,6 +50,15 @@ npm run epoch e1-first-coal --from-save state/saves/e0-bootstrap-v1.zip
 npm test
 ```
 
+## Test fixtures
+
+Epoch yamls may set `_fixture.attempts: [<dir>, ...]` to bypass the LLM
+Designer and load a hand-authored `plan.yaml` (and optional
+`staged-modules/`) per attempt. The seam lives in `src/runner/design.js`
+and only fires when the key is present, so production epochs are
+untouched. Used by `epochs/e_test_proposal-loop.yaml` to deterministically
+exercise the executor proposal loop end-to-end.
+
 ## Origin
 
 Distilled from lessons of `~/factorio-agent` (long-running single-session, copy-bug on scale change) and the abandoned `yoitsu-v2` (over-engineered orchestration). Three architectural rules carried over:
