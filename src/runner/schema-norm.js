@@ -141,3 +141,38 @@ export const PLAN_SCHEMA = {
   wrappers: ["plan", "design", "result", "data", "output"],
   aliases: {},
 };
+
+// Parent designer's decomposition output. Triggered by `mode: "decompose"`.
+// The runner spawns one sub-designer per entry in `subs`, then synthesises
+// the final plan.yaml algorithmically (no LLM). Single-region plans keep
+// using PLAN_SCHEMA (mode field absent or "single").
+export const DECOMPOSITION_SCHEMA = {
+  required: ["mode", "epoch", "subs"],
+  optional: { extra: {} },
+  wrappers: ["plan", "design", "decomposition", "result", "data", "output"],
+  aliases: {},
+};
+
+// Sub-designer per-region output. Includes ports with actual world coords
+// so the connector injector can routeBelt between paired ports.
+export const FRAGMENT_SCHEMA = {
+  required: ["mode", "sub_id", "placements", "ports"],
+  optional: {
+    connections: [],
+    expected_local_throughput: null,
+    scaling_note: "",
+    extra: {},
+  },
+  wrappers: ["fragment", "plan", "design", "result", "data", "output"],
+  aliases: {},
+};
+
+// Executor's structured failure proposal, written to <executeOut>/proposal.json
+// when placement fails irrecoverably. epoch.js retry path attaches it to
+// previousAttempts[].executor_proposal so the next design retry sees it.
+export const PROPOSAL_SCHEMA = {
+  required: ["failed_step", "root_cause", "suggested_changes"],
+  optional: { failed_entity: null, extra: {} },
+  wrappers: ["proposal", "result", "data", "output"],
+  aliases: {},
+};

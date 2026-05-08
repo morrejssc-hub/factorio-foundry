@@ -30,7 +30,7 @@ test("dry-validate passes a minimal valid plan", async () => {
     placements: [{ id: "p0", module: "m", anchor: { x: 0, y: 0 }, direction: "north" }],
     connections: [],
     expected_throughput: 1,
-    why_not_replicate: "single module sufficient",
+    scaling_note: "single module sufficient",
   };
   const verdict = await runDryValidate({ plan, modules, outDir: out });
   assert.equal(verdict.ok, true, verdict.errors?.join("\n"));
@@ -48,7 +48,7 @@ test("dry-validate detects overlapping footprints", async () => {
     ],
     connections: [],
     expected_throughput: 0,
-    why_not_replicate: "overlap test",
+    scaling_note: "overlap test",
   };
   const verdict = await runDryValidate({ plan, modules, outDir: out });
   assert.equal(verdict.ok, false);
@@ -62,11 +62,11 @@ test("dry-validate detects missing required fields", async () => {
   const plan = {
     epoch: "test",
     placements: [{ id: "p0", module: "m", anchor: { x: 0, y: 0 }, direction: "north" }],
-    // connections / expected_throughput / why_not_replicate intentionally missing
+    // connections / expected_throughput / scaling_note intentionally missing
   };
   const verdict = await runDryValidate({ plan, modules, outDir: out });
   assert.equal(verdict.ok, false);
-  for (const f of ["connections", "expected_throughput", "why_not_replicate"]) {
+  for (const f of ["connections", "expected_throughput", "scaling_note"]) {
     assert.ok(verdict.errors.some((e) => e.includes(f)), `missing error for ${f}`);
   }
   await rm(out, { recursive: true, force: true });
@@ -80,7 +80,7 @@ test("dry-validate detects unknown module reference", async () => {
     placements: [{ id: "p0", module: "ghost", anchor: { x: 0, y: 0 }, direction: "north" }],
     connections: [],
     expected_throughput: 0,
-    why_not_replicate: "n/a",
+    scaling_note: "n/a",
   };
   const verdict = await runDryValidate({ plan, modules, outDir: out });
   assert.equal(verdict.ok, false);
@@ -102,7 +102,7 @@ test("dry-validate connections: kind mismatch flagged", async () => {
     ],
     connections: [{ from: { placement: "a", port: "o" }, to: { placement: "b", port: "i" }, required_throughput: 1 }],
     expected_throughput: 1,
-    why_not_replicate: "n/a",
+    scaling_note: "n/a",
   };
   const verdict = await runDryValidate({ plan, modules, outDir: out });
   assert.equal(verdict.ok, false);

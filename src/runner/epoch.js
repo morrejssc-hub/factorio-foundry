@@ -256,11 +256,21 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     } catch (error) {
       attemptError = error.message;
       log(`[epoch ${epoch.id}] attempt ${attempt} failed before audit: ${error.message}`);
+      // If the execute phase wrote a structured proposal.json before throwing,
+      // attach it to previousAttempts + designer-history so the next design
+      // retry sees a focused failure record (root_cause, suggested_changes)
+      // instead of just the raw error string. Designer prompt has a section
+      // "Reading executor_proposal in TASK HISTORY" that consumes this.
+      let executorProposal = null;
+      try {
+        executorProposal = JSON.parse(await readFile(join(executeOut, "proposal.json"), "utf8"));
+      } catch { /* no proposal (failure before execute, or execute didn't write one) — proceed */ }
       previousAttempts.push({
         attempt,
         plan: designResult?.plan,
         authored: designResult?.authored,
         error: error.message,
+        executor_proposal: executorProposal,
       });
       historyEntries.push({
         attempt,
@@ -273,6 +283,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         scaling_note: designResult?.plan?.scaling_note ?? null,
         audit: null,
         error: error.message,
+        executor_proposal: executorProposal,
       });
       await flushHistory();
     }

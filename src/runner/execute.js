@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { piInvoke } from "../pi-invoke.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 import { DIRECTION_NAMES } from "../geometry/schema.js";
+import { buildPlacementProposal, buildConnectionProposal } from "./executor-proposal.js";
 
 async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
   const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
@@ -320,12 +321,34 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
       } catch (repairError) {
         perPlacement.push({ placement: placement.id, ok: false, error: error.message, repairError: repairError.message });
         await writeFile(join(outDir, "execute.json"), JSON.stringify({ ok: false, perPlacement }, null, 2), "utf8");
+        // Structured proposal for design retry feedback. Placement here is
+        // the one that failed; classifyRootCause inspects the error message
+        // to bucket common failure shapes (collision / missing resource /
+        // blueprint geometry / etc.) into a small enum the LLM can reason
+        // about. The raw error is preserved in extra.raw_error.
+        const failedStep = plan.placements.findIndex((p) => p.id === placement.id);
+        const proposal = buildPlacementProposal(failedStep, placement, error);
+        await writeFile(join(outDir, "proposal.json"), JSON.stringify(proposal, null, 2), "utf8");
         throw new Error(`execute failed at placement ${placement.id}: ${error.message}`);
       }
     }
   }
 
-  const connectionResults = await routeConnections({ config, plan, modules, log });
+  let connectionResults;
+  try {
+    connectionResults = await routeConnections({ config, plan, modules, log });
+  } catch (connError) {
+    // routeConnections throws "connection <from>→<to> failed: <reason>".
+    // Parse the from/to back out so the proposal can name the offending pair.
+    const match = (connError.message || "").match(/^connection (\S+)→(\S+) failed: /);
+    const conn = match
+      ? (plan.connections || []).find((c) => c.from === match[1] && c.to === match[2])
+      : null;
+    const proposal = buildConnectionProposal(conn ?? (match ? { from: match[1], to: match[2] } : null), connError);
+    await writeFile(join(outDir, "proposal.json"), JSON.stringify(proposal, null, 2), "utf8");
+    await writeFile(join(outDir, "execute.json"), JSON.stringify({ ok: false, perPlacement, connections: [], save: null }, null, 2), "utf8");
+    throw connError;
+  }
 
   log(`[execute] saving game…`);
   await postAction(config, { action: "save" }, { timeoutMs: 60_000 });

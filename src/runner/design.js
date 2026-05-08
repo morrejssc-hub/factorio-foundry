@@ -7,13 +7,15 @@
 // This is the architectural lever that prevents the "4-miner copy" bug seen
 // in ~/factorio-agent: the agent literally cannot place anything, so its
 // only output channel is a written plan. Composition replaces improvisation.
-import { mkdir, readFile, copyFile, symlink, lstat, readdir } from "node:fs/promises";
+import { mkdir, readFile, copyFile, symlink, lstat, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
-import { normalize, PLAN_SCHEMA } from "./schema-norm.js";
-import { loadModule } from "../lib-loader.js";
+import { normalize, PLAN_SCHEMA, DECOMPOSITION_SCHEMA } from "./schema-norm.js";
+import { loadModule, loadAllModulesWithStaged } from "../lib-loader.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
+import { runSubDesigners } from "./sub-designer.js";
+import { injectConnectors } from "./connector-injector.js";
 
 const FORBIDDEN_TOOL_PATTERNS = [
   /tool[_-]?name["']?\s*[:=]\s*["']?factorio_action/i,
@@ -59,6 +61,104 @@ function validatePlan(parsed, allowedModules) {
       }
     }
   }
+  return { effective: normalized, errors: allErrors, warnings, unwrapped };
+}
+
+// Validate the parent designer's decomposition output. Runs DECOMPOSITION_SCHEMA
+// normalization, then deeper structural checks (region non-overlap, paired_with
+// references resolve to declared inputs). Per-fragment validation lives in
+// sub-designer.js; per-pairing routeBelt feasibility lives in connector-injector.js.
+function validateDecomposition(parsed) {
+  const { normalized, errors, warnings, unwrapped } = normalize(parsed, DECOMPOSITION_SCHEMA);
+  const allErrors = [...errors];
+  if (!normalized) return { effective: null, errors: allErrors, warnings, unwrapped };
+
+  if (normalized.mode !== "decompose") {
+    allErrors.push(`mode must be "decompose" (got "${normalized.mode}")`);
+  }
+  if (typeof normalized.epoch !== "string") {
+    allErrors.push(`epoch must be a string`);
+  }
+  if (!Array.isArray(normalized.subs)) {
+    allErrors.push(`subs must be an array`);
+    return { effective: normalized, errors: allErrors, warnings, unwrapped };
+  }
+  if (normalized.subs.length < 2) {
+    allErrors.push(`decomposition with fewer than 2 subs is not useful — use single-mode plan.yaml instead`);
+  }
+
+  const subIds = new Set();
+  for (const [i, s] of normalized.subs.entries()) {
+    if (!s || typeof s !== "object") {
+      allErrors.push(`subs[${i}] must be a mapping`);
+      continue;
+    }
+    if (!s.id || typeof s.id !== "string") {
+      allErrors.push(`subs[${i}].id missing or not a string`);
+      continue;
+    }
+    if (subIds.has(s.id)) allErrors.push(`subs[${i}].id "${s.id}" is duplicated`);
+    else subIds.add(s.id);
+    if (!s.region
+        || !Number.isFinite(s.region.x_min) || !Number.isFinite(s.region.x_max)
+        || !Number.isFinite(s.region.y_min) || !Number.isFinite(s.region.y_max)) {
+      allErrors.push(`subs[${i}].region must be {x_min, x_max, y_min, y_max} all numbers`);
+    }
+    if (s.contract && typeof s.contract === "object") {
+      for (const [j, o] of (s.contract.outputs || []).entries()) {
+        if (!o || !o.id || !o.item || !o.paired_with) {
+          allErrors.push(`subs[${i}].contract.outputs[${j}] must have id, item, paired_with`);
+        }
+      }
+      for (const [j, p] of (s.contract.inputs || []).entries()) {
+        if (!p || !p.id || !p.item || !p.paired_with) {
+          allErrors.push(`subs[${i}].contract.inputs[${j}] must have id, item, paired_with`);
+        }
+      }
+    }
+  }
+
+  // Pairwise region non-overlap (entities in two subs would collide).
+  for (let i = 0; i < normalized.subs.length; i++) {
+    for (let j = i + 1; j < normalized.subs.length; j++) {
+      const a = normalized.subs[i].region;
+      const b = normalized.subs[j].region;
+      if (!a || !b) continue;
+      if (a.x_min < b.x_max && b.x_min < a.x_max
+          && a.y_min < b.y_max && b.y_min < a.y_max) {
+        allErrors.push(
+          `subs[${i}] (${normalized.subs[i].id}) and subs[${j}] (${normalized.subs[j].id}) regions overlap`,
+        );
+      }
+    }
+  }
+
+  // paired_with references resolve to declared inputs/outputs on the other sub.
+  for (const sub of normalized.subs) {
+    for (const o of (sub.contract?.outputs || [])) {
+      if (typeof o.paired_with === "string" && o.paired_with.includes(".")) {
+        const [otherId, otherPort] = o.paired_with.split(".", 2);
+        const otherSub = normalized.subs.find((s) => s.id === otherId);
+        if (!otherSub) {
+          allErrors.push(`sub ${sub.id}: contract.outputs.${o.id}.paired_with references unknown sub "${otherId}"`);
+        } else if (!(otherSub.contract?.inputs || []).find((p) => p.id === otherPort)) {
+          allErrors.push(`sub ${sub.id}: contract.outputs.${o.id}.paired_with references unknown input "${otherPort}" on sub ${otherId}`);
+        }
+      }
+    }
+    for (const inp of (sub.contract?.inputs || [])) {
+      if (typeof inp.paired_with === "string" && inp.paired_with.includes(".")) {
+        const [otherId, otherPort] = inp.paired_with.split(".", 2);
+        const otherSub = normalized.subs.find((s) => s.id === otherId);
+        if (!otherSub) {
+          allErrors.push(`sub ${sub.id}: contract.inputs.${inp.id}.paired_with references unknown sub "${otherId}"`);
+        } else if (!(otherSub.contract?.outputs || []).find((p) => p.id === otherPort)) {
+          allErrors.push(`sub ${sub.id}: contract.inputs.${inp.id}.paired_with references unknown output "${otherPort}" on sub ${otherId}`);
+        }
+      }
+    }
+  }
+
   return { effective: normalized, errors: allErrors, warnings, unwrapped };
 }
 
@@ -222,8 +322,12 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
   }
   userMessageLines.push(
     ``,
-    `OUTPUT plan.yaml: write a single file plan.yaml in cwd. The validator`,
-    `requires EXACTLY these 5 top-level keys, no more, no less:`,
+    `OUTPUT plan.yaml: write a single file plan.yaml in cwd.`,
+    ``,
+    `Two modes are accepted — pick ONE based on the epoch goal:`,
+    ``,
+    `(A) Single mode — DEFAULT for most epochs. Validator requires EXACTLY`,
+    `these 5 top-level keys, no more, no less:`,
     ``,
     `  epoch: ${epoch.id}`,
     `  placements:`,
@@ -235,13 +339,32 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `  expected_throughput: <number>             # items/s of target item`,
     `  scaling_note: <one-sentence string>`,
     ``,
-    `You are NOT writing a runbook. Do NOT add: id (top-level), created,`,
-    `steps, kind, action, depends_on, formula, assert, entities, risks,`,
-    `success_criteria, version, module (top-level), starter_fuel, anchor`,
-    `(top-level), or any per-step structure. The runner walks, places,`,
-    `seeds fuel, waits, audits, and saves on its own; your only job is to`,
-    `pick which module to place and where (and, if required above, to`,
-    `author the module first).`,
+    `(B) Decomposition mode — OPT-IN, only when the epoch goal asks for it`,
+    `or the target naturally splits into multiple regions connected by`,
+    `belts (>30 tiles apart). See the system prompt section "Decomposition`,
+    `mode" for the full schema. Briefly, write THESE 3 top-level keys instead:`,
+    ``,
+    `  mode: decompose`,
+    `  epoch: ${epoch.id}`,
+    `  subs:                                      # array of {id, region, contract, allowed_modules?}`,
+    `    - id: <region-id>`,
+    `      region: { x_min, x_max, y_min, y_max }`,
+    `      contract:`,
+    `        inputs: [{ id, item, rate, paired_with: "<other_sub_id>.<port_id>" }]`,
+    `        outputs: [{ id, item, rate, paired_with: "<other_sub_id>.<port_id>" }]`,
+    ``,
+    `In decomposition mode, the runner spawns one sub-designer per \`subs\``,
+    `entry to fill placements; YOU do not write \`placements\` / \`connections\``,
+    `/ \`expected_throughput\` / \`scaling_note\` at the top level — those are`,
+    `synthesised. If the epoch yaml strongly suggests decomposition (e.g.`,
+    `"this epoch verifies decomposition"), choose mode (B). Otherwise default`,
+    `to (A).`,
+    ``,
+    `In EITHER mode you are NOT writing a runbook. Do NOT add: id (top-level),`,
+    `created, steps, kind, action, depends_on, formula, assert, entities,`,
+    `risks, success_criteria, version, module (top-level), starter_fuel,`,
+    `anchor (top-level), or any per-step structure. The runner walks,`,
+    `places, seeds fuel, waits, audits, and saves on its own.`,
     ``,
     `Read state.yaml for world coordinates and lib/modules/ for module`,
     `footprints, then write plan.yaml and exit.`,
@@ -302,18 +425,110 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
 
     text = await readFile(planPath, "utf8").catch(() => null);
     parsed = text ? parseYaml(text) : null;
-    validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
-                            : { effective: null, errors: ["plan.yaml not produced"], warnings: [], unwrapped: false };
-    errors = validation.errors;
-    for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
-    if (validation.effective) parsed = validation.effective;
 
-    // If module authoring was required, validate the staged artefacts. Errors
-    // here join the plan errors so retry feedback covers both at once.
-    if (mustAuthorIds.length > 0) {
-      const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
-      authored = stagedResult.authored;
-      errors = [...errors, ...stagedResult.errors];
+    if (parsed && parsed.mode === "decompose") {
+      // ===== Decomposition path =====
+      // Parent designer chose to split the epoch into N spatially independent
+      // regions. Validate the decomposition output, spawn sub-designers in
+      // parallel, then merge their fragments + inject inter-region connectors
+      // algorithmically. The synthesized plan overwrites plan.yaml so the
+      // downstream phases (dry-validate / execute / audit) consume the same
+      // shape they always have. No in-call retry: errors throw and the outer
+      // recovery_attempts loop in epoch.js retries the whole epoch with the
+      // failure surfaced via designer-history.yaml.
+      const dval = validateDecomposition(parsed);
+      for (const w of dval.warnings || []) console.log(`[design normalize] ${w}`);
+      if (dval.errors.length) {
+        throw new Error(
+          `decomposition output failed validation:\n  ` + dval.errors.join("\n  "),
+        );
+      }
+      await writeFile(join(outDir, "decomposition.yaml"), stringifyYaml(dval.effective), "utf8");
+
+      // Parent's authored modules need to be ratified before sub-designers
+      // (and the connector injector's module map) consume them.
+      if (mustAuthorIds.length > 0) {
+        const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
+        authored = stagedResult.authored;
+        if (stagedResult.errors.length) {
+          throw new Error(
+            `parent designer staged modules failed validation:\n  ` +
+            stagedResult.errors.join("\n  "),
+          );
+        }
+      }
+
+      const subResults = await runSubDesigners({
+        config, epoch,
+        decomposition: dval.effective,
+        probeDir,
+        parentDesignDir: outDir,
+        parentStagedDir: allowAuthor ? stagedDir : null,
+        log: (m) => console.log(m),
+      });
+      await writeFile(
+        join(outDir, "sub-designer-summary.json"),
+        JSON.stringify(subResults.map((r) => ({
+          sub_id: r.sub_id,
+          ok: r.fragment != null && r.errors.length === 0,
+          errors: r.errors,
+          placements: r.fragment ? (r.fragment.placements || []).length : 0,
+          ports: r.fragment ? Object.keys(r.fragment.ports || {}).length : 0,
+          pi_call: r.raw ? {
+            wall_ms: r.raw.wall_ms,
+            usage: r.raw.usage,
+            cost_usd: r.raw.cost?.total ?? 0,
+            model: r.raw.model,
+            provider: r.raw.provider,
+            turns: r.raw.turns,
+          } : null,
+        })), null, 2),
+        "utf8",
+      );
+
+      const modules = await loadAllModulesWithStaged(config.libDir, allowAuthor ? stagedDir : null);
+      const ci = await injectConnectors({
+        decomposition: dval.effective,
+        subResults,
+        modules,
+        rootDir: config.rootDir,
+      });
+      if (ci.errors.length) {
+        throw new Error(
+          `connector injection failed:\n  ` + ci.errors.join("\n  "),
+        );
+      }
+
+      // Overwrite plan.yaml with the synthesized plan, then run the same
+      // PLAN_SCHEMA validator the single-mode path uses as a final guard.
+      await writeFile(planPath, stringifyYaml(ci.plan), "utf8");
+      text = stringifyYaml(ci.plan);
+      validation = validatePlan(ci.plan, epoch.allowed_modules);
+      errors = validation.errors;
+      for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
+      if (validation.effective) parsed = validation.effective;
+      if (errors.length) {
+        throw new Error(
+          `synthesized plan failed PLAN_SCHEMA:\n  ` + errors.join("\n  "),
+        );
+      }
+      trace.decomposition = true;
+      trace.subs_count = dval.effective.subs.length;
+    } else {
+      // ===== Single-mode path (existing behaviour) =====
+      validation = parsed ? validatePlan(parsed, epoch.allowed_modules)
+                              : { effective: null, errors: ["plan.yaml not produced"], warnings: [], unwrapped: false };
+      errors = validation.errors;
+      for (const w of validation.warnings || []) console.log(`[design normalize] ${w}`);
+      if (validation.effective) parsed = validation.effective;
+
+      // If module authoring was required, validate the staged artefacts. Errors
+      // here join the plan errors so retry feedback covers both at once.
+      if (mustAuthorIds.length > 0) {
+        const stagedResult = await validateStagedModules(stagedDir, mustAuthorIds);
+        authored = stagedResult.authored;
+        errors = [...errors, ...stagedResult.errors];
+      }
     }
 
     // One retry with error feedback (parallel to probe.js). If schema fails,

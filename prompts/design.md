@@ -155,6 +155,76 @@ expected_throughput: 0.20
 scaling_note: One iron-smelt-line delivers 0.20 plate/s, well above the 0.05 threshold.
 ```
 
+## Decomposition mode (optional)
+
+For most epochs, output a single `plan.yaml` with all placements. But if
+the target requires connecting multiple physically separated regions
+(e.g. ore patches >30 tiles apart with belts between them), you may
+instead output a **decomposition** that delegates each region to a
+sub-designer.
+
+**Triggering rule**: choose decomposition only when the plan WOULD
+require inter-region transport-belt connectors AND the regions can be
+designed independently (each region has its own anchor/clustering
+decision). For single-region plans, keep using plan.yaml — decomposition
+is not free.
+
+When you decompose, write `plan.yaml` with the decomposition schema
+instead of the placement schema:
+
+```yaml
+mode: decompose
+epoch: <epoch id>
+subs:
+  - id: <short-id, e.g. coal-region>
+    region: { x_min: <num>, x_max: <num>, y_min: <num>, y_max: <num> }
+    contract:
+      inputs: []                                # ports this region consumes
+      outputs:
+        - id: <port-id>                         # local id, e.g. coal_out
+          item: <factorio-item-name>
+          rate: <items-per-sec>
+          paired_with: <other_sub_id>.<their_port_id>
+    allowed_modules: [<subset of epoch.allowed_modules>]   # optional
+  - id: <next-sub-id>
+    region: { ... }
+    contract:
+      inputs:
+        - id: <port-id>
+          item: <factorio-item-name>
+          rate: <items-per-sec>
+          paired_with: <first_sub_id>.<their_port_id>
+      outputs: []
+```
+
+**Rules:**
+
+- Each `subs[i].id` is unique within the decomposition.
+- `region` bboxes MUST NOT overlap — entities in two subs would collide.
+- Every output's `paired_with` must reference an input in another sub
+  (`<sub_id>.<port_id>`), and every input must reference an output.
+  Unpaired ports get no connector and the runner fails the epoch.
+- `allowed_modules` defaults to the parent's `epoch.allowed_modules` if
+  omitted.
+
+The runner spawns one sub-designer per `subs` entry, gives each its
+contract + the same `state.yaml`, collects each sub's
+`plan-fragment.yaml`, then ALGORITHMICALLY (no LLM) injects connector
+belts between paired ports and builds the final plan that flows into
+dry-validate / execute / audit.
+
+In decomposition mode you do NOT write `placements` / `connections` /
+`expected_throughput` / `scaling_note` at the top level — those are
+synthesised from the sub fragments. The 5-key plan schema is replaced by
+the 3-key decomposition schema (`mode`, `epoch`, `subs`).
+
+### When NOT to decompose
+
+- Single ore patch + single output → use plan.yaml.
+- All target placements share a region < 20 tiles wide → use plan.yaml.
+- You're not sure → use plan.yaml. Decomposition is opt-in, single-mode
+  is the default.
+
 ## When to use `extra:`
 
 `extra:` is a sanctioned, **open** mapping for anything that doesn't fit the
@@ -247,6 +317,29 @@ must be authored. For each such id:
   succeed but audit will measure ~0 throughput and the epoch fails. There
   is no retry of authoring on audit failure in this iteration; iterate by
   re-running the epoch with prompt adjustments.
+
+## Reading `executor_proposal` in TASK HISTORY
+
+`designer-history.yaml` may contain entries with an `executor_proposal`
+field. This is a structured failure record from the executor when a
+prior attempt's `execute` phase couldn't place the plan:
+
+```yaml
+executor_proposal:
+  failed_step: 2                       # placements[2] is what failed
+  failed_entity: { item: stone-furnace, position: { x: -10, y: 25 }, direction: north }
+  root_cause: collision_with_existing  # or: missing_resource | out_of_region | blueprint_invalid | rcon_error
+  suggested_changes:
+    - { type: shift, offset: { dx: 2, dy: 0 } }
+    - { type: swap_module, to: <module-id> }
+```
+
+When you see `executor_proposal`, **prefer the suggested_changes over
+re-guessing the layout**. The executor saw the actual world state at
+placement time and knows what's blocking — your job is to incorporate
+the suggestion or provide a reasoned alternative if the suggestion
+conflicts with another constraint. Re-improvising from scratch when a
+structured proposal is available wastes a retry.
 
 ## Design goals (priority order)
 
