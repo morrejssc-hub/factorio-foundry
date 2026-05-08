@@ -171,6 +171,12 @@ const RECIPES = new Map([
   ["steam-engine", { count: 1, ingredients: { "iron-gear-wheel": 8, "iron-plate": 10, pipe: 5 } }],
   ["wooden-chest", { count: 1, ingredients: { wood: 2 } }],
   ["iron-chest", { count: 1, ingredients: { "iron-plate": 8 } }],
+  ["copper-cable", { count: 2, ingredients: { "copper-plate": 1 } }],
+  ["electronic-circuit", { count: 1, ingredients: { "iron-plate": 1, "copper-cable": 3 } }],
+  ["small-electric-pole", { count: 2, ingredients: { wood: 1, "copper-cable": 2 } }],
+  ["assembling-machine-1", { count: 1, ingredients: { "iron-plate": 9, "iron-gear-wheel": 5, "electronic-circuit": 3 } }],
+  ["inserter", { count: 1, ingredients: { "iron-gear-wheel": 1, "iron-plate": 1, "electronic-circuit": 1 } }],
+  ["automation-science-pack", { count: 1, ingredients: { "copper-plate": 1, "iron-gear-wheel": 1 } }],
 ]);
 
 const BLUEPRINT_NAME_RE = /^[A-Za-z0-9_.-]+$/;
@@ -1432,6 +1438,22 @@ rcon.print("total=" .. total)
       perSecond: delta / (elapsedTicks / 60),
       beforeOutput: before.output,
       afterOutput: after.output,
+    };
+  }
+
+  // Returns the local hand-craft RECIPES table — the actual subset that
+  // the `craft` action accepts. Distinct from earlyGameCatalog, which
+  // reflects the in-game force.recipes superset and can mislead an agent
+  // into asking for crafts the executor will reject.
+  craftCatalog() {
+    return {
+      type: "craft_catalog",
+      description: "Items the worker can hand-craft via factorio_action craft. Subset of the in-game recipe set; if an item is not listed here, do not call craft for it.",
+      recipes: [...RECIPES.entries()].map(([item, recipe]) => ({
+        item,
+        count: recipe.count,
+        ingredients: { ...recipe.ingredients },
+      })),
     };
   }
 
@@ -3497,7 +3519,7 @@ end
 
   async handleRead(input) {
     const action = input?.action || "status";
-    if (!["status", "logs"].includes(action)) {
+    if (!["status", "logs", "craft_catalog"].includes(action)) {
       await this.start();
     }
     switch (action) {
@@ -3505,6 +3527,8 @@ end
         return this.status();
       case "logs":
         return { logs: await this.logs(input.lines || 120) };
+      case "craft_catalog":
+        return this.craftCatalog();
       case "query_script":
         if (!input.script) throw new Error("script is required for query_script");
         return this.runReadScript(input.script, input.params || {});

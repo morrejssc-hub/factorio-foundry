@@ -66,6 +66,22 @@ test("normalizeBlueprint rejects legacy top-level fuel array", () => {
   }), /no longer supported/);
 });
 
+test("craftCatalog lists hand-craft recipes including red-science chain", () => {
+  const srv = makeServer();
+  const cat = srv.craftCatalog();
+  assert.equal(cat.type, "craft_catalog");
+  const items = new Set(cat.recipes.map((r) => r.item));
+  for (const required of [
+    "iron-gear-wheel", "copper-cable", "electronic-circuit",
+    "small-electric-pole", "assembling-machine-1", "inserter",
+    "automation-science-pack",
+  ]) {
+    assert.ok(items.has(required), `craft_catalog missing ${required}`);
+  }
+  const aspack = cat.recipes.find((r) => r.item === "automation-science-pack");
+  assert.deepEqual(aspack.ingredients, { "copper-plate": 1, "iron-gear-wheel": 1 });
+});
+
 test("normalizeBlueprint loads a migrated coal-burner-cell blueprint with three fuel actions", async () => {
   const { readFile } = await import("node:fs/promises");
   const text = await readFile(new URL("../lib/blueprints/coal-burner-cell.json", import.meta.url), "utf8");
