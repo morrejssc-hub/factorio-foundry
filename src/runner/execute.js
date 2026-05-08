@@ -82,7 +82,7 @@ async function placeOne({ config, placement, modules, log }) {
   return { dry, live };
 }
 
-async function repairWithPi({ config, epoch, plan, placement, error, outDir, log }) {
+async function repairWithPi({ config, epoch, plan, placement, error, outDir, log, stateYamlPath }) {
   const repairDir = join(outDir, "repair", placement.id);
   await mkdir(repairDir, { recursive: true });
   await writeFile(join(repairDir, "plan.yaml"), JSON.stringify(plan, null, 2), "utf8");
@@ -91,6 +91,11 @@ async function repairWithPi({ config, epoch, plan, placement, error, outDir, log
     error: error.message,
     payload: error.payload,
   }, null, 2), "utf8");
+  // Surface state.yaml inside the repair cwd so the agent can grep
+  // world_inventory without escaping upward through symlinks.
+  if (stateYamlPath) {
+    try { await copyFile(stateYamlPath, join(repairDir, "state.yaml")); } catch {}
+  }
   const factorioServerExt = resolve(config.rootDir, ".pi/extensions/factorio-server/index.ts");
   const message = [
     `A deterministic blueprint placement failed.`,
@@ -329,7 +334,7 @@ async function findNewestSave(savesDir) {
  * @param {string} args.savePathOut  — destination for the produced save zip
  * @returns {Promise<{savePath: string, perPlacement: object[]}>}
  */
-export async function runExecute({ config, epoch, plan, modules, outDir, savePathOut }) {
+export async function runExecute({ config, epoch, plan, modules, outDir, savePathOut, stateYamlPath }) {
   await mkdir(outDir, { recursive: true });
   const log = (msg) => {
     console.log(msg);
@@ -342,7 +347,7 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
     } catch (error) {
       log(`[execute] placement ${placement.id} failed: ${error.message}`);
       try {
-        await repairWithPi({ config, epoch, plan, placement, error, outDir, log });
+        await repairWithPi({ config, epoch, plan, placement, error, outDir, log, stateYamlPath });
         perPlacement.push({ placement: placement.id, ok: true, repaired: true });
       } catch (repairError) {
         perPlacement.push({ placement: placement.id, ok: false, error: error.message, repairError: repairError.message });

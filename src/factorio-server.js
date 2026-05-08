@@ -828,7 +828,14 @@ export class FactorioServer {
   async loadActionState() {
     const text = await readFile(this.actionStatePath(), "utf8").catch(() => null);
     if (text) {
-      return normalizeActionState(JSON.parse(text));
+      try {
+        return normalizeActionState(JSON.parse(text));
+      } catch (e) {
+        // Corrupted state files (e.g., concatenated JSON from a crashed
+        // earlier run) should not block executor calls — reset and warn.
+        console.log(`[factorio] action-state.json corrupt (${e.message}); resetting`);
+        return normalizeActionState();
+      }
     }
     return normalizeActionState();
   }

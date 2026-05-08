@@ -213,6 +213,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         modules,
         outDir: executeOut,
         savePathOut: candidateSavePath,
+        stateYamlPath: probeResult.stateYamlPath,
       });
       log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
 
@@ -555,7 +556,7 @@ async function runOneDesign(idx, { config, epoch, probeResult, runDir, log }) {
   return { idx, cid, candDir, designOut, stagedDir, designResult, modules, dryResult, designError };
 }
 
-async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log }) {
+async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult }) {
   const { idx, cid, candDir, designOut, stagedDir, designResult, modules, designError } = design;
   const candidateSavePath = runSavePath(saveDir, runTs, cid);
   const executeOut = join(candDir, "execute");
@@ -585,6 +586,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
       modules,
       outDir: executeOut,
       savePathOut: candidateSavePath,
+      stateYamlPath: probeResult?.stateYamlPath,
     });
     record.execute = { ok: exResult.ok ?? true, save_path: exResult.savePath };
     log(`[epoch ${epoch.id}] [${cid}] execute ok — save=${exResult.savePath}`);
@@ -660,7 +662,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
     // Parallel execute + benchmark audit.
     log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
     attemptRecords = await Promise.all(
-      designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log })),
+      designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult })),
     );
   } finally {
     await pool.shutdown();

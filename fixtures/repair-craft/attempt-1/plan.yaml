@@ -1,0 +1,6 @@
+epoch: e_test_repair_craft
+placements:
+  - { id: p0, module: coal-burner-cell, anchor: { x: -80, y: -79 }, direction: north }
+connections: []
+expected_throughput: 0.18
+scaling_note: "fixture: single cell on the e_test_repair_bootstrap save's coal patch center (-80,-79); starter has 0 drills, so the placement forces repair-agent to craft 1 burner-mining-drill from iron-plate + iron-gear-wheel (also crafted) + stone-furnace. Anchor is bootstrap-specific because each fresh bootstrap regenerates the map seed; if e_test_repair_bootstrap is re-run, this anchor must be updated to match the new probe.coal_patches center."
