@@ -3,6 +3,7 @@ plans/
 state/saves/
 state/digests/
 state/cache/
+state/world.md
 runtime/
 runtime-slot*/
 *.log

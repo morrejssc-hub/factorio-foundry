@@ -2,13 +2,18 @@
 -- Returns everything needed for state.yaml in a single rcon call.
 --
 -- params:
---   radius      scan radius from worker position in tiles (default 150)
---   cluster_gap max tile-to-tile gap still counted as one patch (default 3)
---   center_x/y  fallback scan center when no worker found (default 0,0)
+--   radius          scan radius from worker position in tiles (default 150)
+--   cluster_gap     max tile-to-tile gap still counted as one patch (default 3)
+--   center_x/y      fallback scan center when no worker found (default 0,0)
+--   chests_to_query optional list of { id, world_pos:{x,y}, item } — for each,
+--                   the script finds the container at that position and reports
+--                   how much of `item` it currently holds. Used by the runner
+--                   to surface world.md's deployed-module chest contents.
 --
 -- Response (JSON, single line):
 --   { ok, tick, worker_found, position:{x,y}, inventory:[{item,count}],
---     coal_patches, iron_patches, copper_patches, stone_patches }
+--     coal_patches, iron_patches, copper_patches, stone_patches,
+--     world_inventory:[{ id, item, count, found:bool }] }
 -- Each patch: { center:{x,y}, tile_count:<int>, total_amount:<int> }
 -- Empty arrays serialize as [] (not null or {}).
 
@@ -118,6 +123,35 @@ return {
     local copper_patches = find_patches("copper-ore")
     local stone_patches  = find_patches("stone")
 
+    -- Query each chest registered in world.md's deployed-modules fence.
+    -- We accept any container-typed entity at the given position; if none,
+    -- emit found=false so the runner can flag a stale registry without
+    -- failing the probe.
+    local world_inventory = {}
+    local chests_to_query = (params and params.chests_to_query) or {}
+    for _, chest in ipairs(chests_to_query) do
+      local pos = chest.world_pos or {}
+      local entity = nil
+      local hits = surface.find_entities_filtered{
+        position = {x = pos.x or 0, y = pos.y or 0},
+        radius = 0.5,
+      }
+      for _, e in ipairs(hits) do
+        if e.valid and e.type == "container" then entity = e; break end
+      end
+      if entity then
+        local inv = entity.get_inventory(defines.inventory.chest)
+        local count = inv and inv.get_item_count(chest.item) or 0
+        world_inventory[#world_inventory + 1] = {
+          id = chest.id, item = chest.item, count = count, found = true,
+        }
+      else
+        world_inventory[#world_inventory + 1] = {
+          id = chest.id, item = chest.item, count = 0, found = false,
+        }
+      end
+    end
+
     -- helpers.table_to_json treats empty tables as {} (object), not [].
     -- Wrap so callers always get a JSON array.
     local function arr(t)
@@ -130,7 +164,8 @@ return {
       '"position":{"x":%g,"y":%g},' ..
       '"inventory":%s,' ..
       '"coal_patches":%s,"iron_patches":%s,' ..
-      '"copper_patches":%s,"stone_patches":%s}',
+      '"copper_patches":%s,"stone_patches":%s,' ..
+      '"world_inventory":%s}',
       game.tick,
       (worker ~= nil) and "true" or "false",
       cx, cy,
@@ -138,7 +173,8 @@ return {
       arr(coal_patches),
       arr(iron_patches),
       arr(copper_patches),
-      arr(stone_patches)
+      arr(stone_patches),
+      arr(world_inventory)
     ))
   end
 }

@@ -13,6 +13,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { piInvoke } from "../pi-invoke.js";
 import { normalize, PLAN_SCHEMA, DECOMPOSITION_SCHEMA } from "./schema-norm.js";
 import { loadModule, loadAllModulesWithStaged } from "../lib-loader.js";
+import { worldMdPath, readWorldMd } from "./world-md.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 import { runSubDesigners } from "./sub-designer.js";
 import { injectConnectors } from "./connector-injector.js";
@@ -257,6 +258,17 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
   // grep modules and read blueprints without being able to escape upward.
   await ensureSymlink(config.libDir, join(outDir, "lib"));
 
+  // Surface state/world.md — cross-epoch agent notebook. Contains the
+  // deployed-modules fence (which probe also uses to derive
+  // world_inventory) plus free-form prose annotations from prior
+  // attempts. Symlinked so any prose edits the Designer makes land back
+  // in the canonical file.
+  const wmPath = worldMdPath(config);
+  // Ensure the file exists before symlinking — readWorldMd creates from
+  // template on first access.
+  await readWorldMd(wmPath);
+  await ensureSymlink(wmPath, join(outDir, "world.md"));
+
   // If the epoch allows module creation, surface a writable staged-modules/
   // directory inside the design cwd. The Designer writes new module yaml +
   // blueprint json there; this runner validates them after the pi exits and
@@ -315,7 +327,14 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `Emit a placement specification for epoch ${epoch.id}.`,
     ``,
     `Inputs in your cwd:`,
-    `  - state.yaml (probe output)`,
+    `  - state.yaml (probe output: worker inv, resource patches,`,
+    `    world_inventory — live counts of every chest registered in`,
+    `    world.md's deployed-modules fence)`,
+    `  - world.md (cross-epoch agent notebook: deployed-modules yaml fence`,
+    `    plus free-form prose. The fence is what the probe enumerates;`,
+    `    the prose is yours to read for context and edit if you want to`,
+    `    leave notes for future epochs. Reference items in world_inventory`,
+    `    before designing fresh mining — reuse beats re-extract.)`,
     `  - epoch.yaml`,
     `  - lib/modules/*.yaml, lib/blueprints/*.json (read-only)`,
     ...(allowAuthor ? [`  - staged-modules/ (writable: place new module files here)`] : []),

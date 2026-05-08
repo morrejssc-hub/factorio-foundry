@@ -4,6 +4,8 @@
 //   - bytes of the input save zip
 //   - bytes of epoch.yaml
 //   - bytes of lib/probes/world-census.lua (the deterministic census script)
+//   - bytes of state/world.md (deployed-modules registry — adding a chest
+//     requires a fresh chest-content query)
 //
 // Hash is sha256, truncated to 16 hex chars. Cache files live at
 // state/cache/probe/<key>.yaml and a sibling <key>.meta.json carries human-
@@ -39,11 +41,16 @@ async function hashFile(h, path) {
  * @param {string} args.censusLuaPath — absolute path to world-census.lua
  * @returns {Promise<string>} 16-char hex key
  */
-export async function probeCacheKey({ inputSavePath, epochYamlPath, censusLuaPath }) {
+export async function probeCacheKey({ inputSavePath, epochYamlPath, censusLuaPath, worldMdRaw }) {
   const h = createHash("sha256");
   await hashFile(h, inputSavePath);
   await hashFile(h, epochYamlPath);
   await hashFile(h, censusLuaPath);
+  if (worldMdRaw !== undefined) {
+    h.update("world.md\0");
+    h.update(worldMdRaw || "");
+    h.update("\0");
+  }
   return h.digest("hex").slice(0, 16);
 }
 

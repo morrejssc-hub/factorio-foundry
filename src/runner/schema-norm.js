@@ -126,7 +126,7 @@ export function normalize(parsed, schema) {
 
 export const STATE_SCHEMA = {
   required: ["tick", "worker", "inventory_summary", "coal_patches", "iron_patches"],
-  optional: { notes: "", extra: {} },
+  optional: { notes: "", extra: {}, world_inventory: [] },
   wrappers: ["probe", "state", "result", "data", "output", "findings"],
   aliases: {
     coal_patch: "coal_patches",

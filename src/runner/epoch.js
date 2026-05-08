@@ -23,6 +23,7 @@ import {
   winnerSavePath, resolveInputSave, promoteWinner, writeManifest,
 } from "./run-layout.js";
 import { pickWinner } from "./select-winner.js";
+import { worldMdPath, appendDeployedModule } from "./world-md.js";
 
 export async function loadEpoch(epochsDir, epochId) {
   const path = resolve(epochsDir, `${epochId}.yaml`);
@@ -112,6 +113,12 @@ async function runBootstrapEpoch({ config, factorio, epoch, log }) {
   await mkdir(resolve(out, ".."), { recursive: true });
   await copyFile(newestPath.path, out);
   log(`[epoch ${epoch.id}] output save → ${out}`);
+  // Bootstrap = clean slate. Reset world.md so any prior chain's deployed
+  // modules don't bleed into the new chain. (Re-running bootstrap is the
+  // explicit "wipe and start over" gesture.)
+  const wmPath = worldMdPath(config);
+  await rm(wmPath, { force: true });
+  log(`[epoch ${epoch.id}] reset ${wmPath}`);
   return { ok: true, savePath: out };
 }
 
@@ -342,6 +349,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       await promoteStagedModules({ config, authored: designResult.authored, log, epochId: epoch.id });
     }
     await writeDigest({ config, epoch, verdict, runDir });
+    await appendWinnerToWorldMd({ config, epoch, plan: designResult.plan, log });
   } else {
     log(`[epoch ${epoch.id}] all ${maxAttempts} attempts failed`);
     if (lastVerdict) {
@@ -464,6 +472,29 @@ async function writeRunMeta({
     console.log(`[run-meta] write failed (non-fatal): ${error.message}`);
   }
   return meta;
+}
+
+// world.md append: after a winning composition execute, record each
+// placement as a deployed module so subsequent epochs can see it. The id
+// is namespaced as `<epoch_id>:<plan_id>` to keep entries unique across
+// the chain. Errors are non-fatal — world.md is agent-aid only and we
+// must not regress the epoch result on a bookkeeping failure.
+async function appendWinnerToWorldMd({ config, epoch, plan, log }) {
+  const path = worldMdPath(config);
+  for (const placement of plan?.placements || []) {
+    const globalId = `${epoch.id}:${placement.id}`;
+    try {
+      await appendDeployedModule(path, {
+        id: globalId,
+        module: placement.module,
+        anchor: placement.anchor,
+        direction: placement.direction,
+        epoch: epoch.id,
+      });
+    } catch (e) {
+      log(`[world.md] append ${globalId} failed (non-fatal): ${e.message}`);
+    }
+  }
 }
 
 async function writeDigest({ config, epoch, verdict, runDir }) {
@@ -669,6 +700,9 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
         window_ticks_actual: r.window_ticks_actual ?? null, timestamp: new Date().toISOString() } : null;
     })();
     if (winVerdict) await writeDigest({ config, epoch, verdict: winVerdict, runDir });
+    if (winDesign?.designResult?.plan) {
+      await appendWinnerToWorldMd({ config, epoch, plan: winDesign.designResult.plan, log });
+    }
 
     await writeManifest(runDir, {
       epoch: epoch.id,
