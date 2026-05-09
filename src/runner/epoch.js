@@ -178,7 +178,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
     }
 
-    let designResult, modules, dryResult, exResult, verdict;
+    let designResult, modules, dryResult, exResult, verdict, observeVerdict;
     let attemptError = null;
     try {
       log(`[epoch ${epoch.id}] attempt ${attempt}: design`);
@@ -237,7 +237,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
 
         // Observe: measure the clean save without harness (same meter as verify)
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
-        const observeVerdict = await runAudit({
+        observeVerdict = await runAudit({
           config,
           targetMetric: epoch.target_metric,
           successCriteria: epoch.success_criteria,
@@ -330,6 +330,14 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         item: verdict.item,
         seconds_actual: verdict.seconds_actual,
         produced_delta: verdict.produced_delta,
+      } : null,
+      observe: observeVerdict ? {
+        pass: observeVerdict.pass,
+        measured: observeVerdict.measured,
+        threshold: observeVerdict.threshold,
+        item: observeVerdict.item,
+        seconds_actual: observeVerdict.seconds_actual,
+        produced_delta: observeVerdict.produced_delta,
       } : null,
       error: attemptError,
     });
@@ -606,6 +614,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
     dry_validate: design.dryResult ? { ok: design.dryResult.ok, errors: design.dryResult.errors ?? [] } : null,
     execute: null,
     audit: null,
+    observe: null,
     error: designError,
   };
   if (designError) return record;
@@ -663,6 +672,14 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
         stagedDir,
       });
       log(`[epoch ${epoch.id}] [${cid}] observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
+      record.observe = {
+        pass: observeVerdict.pass,
+        measured: observeVerdict.measured,
+        threshold: observeVerdict.threshold,
+        item: observeVerdict.item,
+        seconds_actual: observeVerdict.seconds_actual,
+        produced_delta: observeVerdict.produced_delta,
+      };
     }
   } catch (err) {
     record.error = err.message;
