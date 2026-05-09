@@ -25,6 +25,12 @@ import {
 import { pickWinner } from "./select-winner.js";
 import { worldMdPath, appendDeployedModule } from "./world-md.js";
 
+// dry-validate failures are spatial/recipe/inventory mistakes that the LLM
+// can fix from prompt feedback alone — no Factorio simulation needed. They
+// get up to N free re-designs without consuming the recovery_attempts
+// budget (which is reserved for the expensive verify/execute failures).
+const MAX_DRY_VALIDATE_RETRIES = 3;
+
 export async function loadEpoch(epochsDir, epochId) {
   const path = resolve(epochsDir, `${epochId}.yaml`);
   const text = await readFile(path, "utf8");
@@ -181,30 +187,71 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     let designResult, modules, dryResult, exResult, verdict, observeVerdict;
     let attemptError = null;
     try {
-      log(`[epoch ${epoch.id}] attempt ${attempt}: design`);
-      designResult = await runDesign({
-        config,
-        epoch,
-        state: probeResult.state,
-        probeDir: join(runDir, "probe"),
-        outDir: designOut,
-        stagedDir,
-        previousAttempts,
-        historyPath: historyEntries.length > 0 ? historyPath : null,
-      });
-      log(`[epoch ${epoch.id}] attempt ${attempt}: design ok — placements=${designResult.plan.placements.length}` +
-          (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
+      // Inner retry: design → dry-validate. dry-validate failures are
+      // spatial/recipe/inventory mistakes (cheap to detect, no Factorio
+      // simulation cost). They get up to MAX_DRY_VALIDATE_RETRIES free
+      // re-designs WITHOUT consuming the attempt budget — recovery_attempts
+      // is reserved for verify/execute failures (which DO carry the 60s+
+      // simulation cost). Each retry pushes the failure to previousAttempts
+      // so the next runDesign sees the dry-validate error and can adjust.
+      let dryValidateRetry = 0;
+      while (true) {
+        const designLabel = dryValidateRetry === 0 ? "design"
+          : `design (free retry ${dryValidateRetry}/${MAX_DRY_VALIDATE_RETRIES})`;
+        log(`[epoch ${epoch.id}] attempt ${attempt}: ${designLabel}`);
+        designResult = await runDesign({
+          config,
+          epoch,
+          state: probeResult.state,
+          probeDir: join(runDir, "probe"),
+          outDir: designOut,
+          stagedDir,
+          previousAttempts,
+          historyPath: historyEntries.length > 0 ? historyPath : null,
+        });
+        log(`[epoch ${epoch.id}] attempt ${attempt}: design ok — placements=${designResult.plan.placements.length}` +
+            (designResult.authored?.length ? ` authored=${designResult.authored.map((a) => a.id).join(",")}` : ""));
 
-      log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate`);
-      modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
-      dryResult = await runDryValidate({
-        plan: designResult.plan,
-        modules,
-        outDir: candDir,
-        config,
-      });
-      if (!dryResult.ok) throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
-      log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
+        log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate`);
+        modules = await loadAllModulesWithStaged(config.libDir, stagedDir);
+        dryResult = await runDryValidate({
+          plan: designResult.plan,
+          modules,
+          outDir: candDir,
+          config,
+        });
+        if (dryResult.ok) {
+          log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
+          break;
+        }
+
+        const dryError = `dry-validate: ${dryResult.errors.join("; ")}`;
+        dryValidateRetry++;
+        if (dryValidateRetry >= MAX_DRY_VALIDATE_RETRIES) {
+          throw new Error(`${dryError} (exhausted ${MAX_DRY_VALIDATE_RETRIES} free retries)`);
+        }
+        log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate failed (free retry ${dryValidateRetry}/${MAX_DRY_VALIDATE_RETRIES}): ${dryResult.errors.join("; ")}`);
+        previousAttempts.push({
+          attempt,
+          plan: designResult.plan,
+          authored: designResult.authored,
+          error: dryError,
+          kind: "dry_validate_fail",
+        });
+        historyEntries.push({
+          attempt,
+          kind: "dry_validate_fail",
+          retry: dryValidateRetry,
+          placements: (designResult.plan.placements || []).map((p) => ({
+            module: p.module,
+            anchor: p.anchor,
+            direction: p.direction,
+          })),
+          expected_throughput: designResult.plan.expected_throughput ?? null,
+          error: dryError,
+        });
+        await flushHistory();
+      }
 
       log(`[epoch ${epoch.id}] attempt ${attempt}: verify`);
       const verifyResult = await runVerify({
