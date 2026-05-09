@@ -1,7 +1,7 @@
 id: e2-first-iron
 kind: composition
 depends_on: [e1-first-coal]
-input_save: state/saves/e1-first-coal-v1.zip
+input_save: state/saves/e1-first-coal/
 goal: |
   On top of the e1 save (which already has a self-fueling coal cell running),
   place a single iron-smelt-line module on an iron-ore patch and sustain a
@@ -23,4 +23,4 @@ budgets:
   probe_timeout_ms: 600000
   design_timeout_ms: 600000
   execute_timeout_ms: 600000
-output_save: state/saves/e2-first-iron-v1.zip
+output_save: state/saves/e2-first-iron/

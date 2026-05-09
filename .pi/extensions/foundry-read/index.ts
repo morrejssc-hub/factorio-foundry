@@ -52,11 +52,22 @@ export default function foundryReadExtension(pi: ExtensionAPI) {
       "or run a custom multi-query probe script from the current directory.",
     promptGuidelines: [
       "Canonical probes: lib/probes/tile-info.lua, lib/probes/validate-placement.lua, " +
-        "lib/probes/player-state.lua, lib/probes/research-state.lua.",
+        "lib/probes/find-placement-anchors.lua, lib/probes/player-state.lua, " +
+        "lib/probes/research-state.lua.",
       "tile-info accepts {x,y} for a single tile or {area:{x1,y1,x2,y2}} for a rectangle. " +
         "Returns tile name, entities (with bounding_box), and resource tiles (with amount).",
       "validate-placement accepts {entities:[{name,position,direction}]} and returns " +
-        "canPlace per entity plus blockingEntities when blocked.",
+        "canPlace per entity plus blockingEntities when blocked. Use this AFTER you have " +
+        "candidate positions to verify a complete blueprint places without collisions.",
+      "find-placement-anchors enumerates LEGAL anchors for a given prototype within a region. " +
+        "Use this BEFORE proposing positions for terrain-sensitive entities (offshore-pump, " +
+        "burner-mining-drill, electric-mining-drill, pumpjack). " +
+        "Params: {entity, region:{left_top,right_bottom} OR {center,radius}, " +
+        "mode:'raw'|'edge', max_results, sort_by, directions?, include_blocked_by_clearable?}. " +
+        "Returns candidates=[{position, directions[], status, needs_clearing?}] grouped " +
+        "by position with one entry per (x,y); pick a direction from the directions array. " +
+        "mode='edge' walks only the bbox perimeter — use it for shoreline anchors (offshore-pump). " +
+        "mode='raw' scans the bbox interior — use it for area-fill (mining-drill on a coal patch).",
       "player-state returns worker position and inventory (sorted by item name).",
       "research-state returns completed technologies, current research, and all enabled recipes.",
       "To combine multiple queries in one RCON round-trip, write a .lua file using the write " +

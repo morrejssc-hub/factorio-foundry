@@ -8,11 +8,22 @@ goal: |
 # bootstrap routine creates the save and stocks the worker inventory.
 starter_inventory:
   - { item: burner-mining-drill, count: 4 }
-  - { item: stone-furnace, count: 2 }
-  - { item: transport-belt, count: 120 }
-  - { item: burner-inserter, count: 8 }
-  - { item: iron-chest, count: 4 }
-  - { item: coal, count: 50 }
-  - { item: iron-plate, count: 20 }
-  - { item: stone, count: 10 }
+  - { item: stone-furnace, count: 4 }
+  - { item: transport-belt, count: 200 }
+  - { item: burner-inserter, count: 12 }
+  - { item: iron-chest, count: 6 }
+  - { item: coal, count: 100 }
+  - { item: iron-plate, count: 50 }
+  - { item: stone, count: 20 }
+  # Power items (for e4 steam power)
+  - { item: offshore-pump, count: 1 }
+  - { item: boiler, count: 1 }
+  - { item: steam-engine, count: 1 }
+  - { item: small-electric-pole, count: 8 }
+  - { item: pipe, count: 10 }
+  - { item: accumulator, count: 4 }
+  # Assembly items (for e5 gear, e6 red bottle)
+  - { item: assembling-machine-1, count: 4 }
+  - { item: iron-gear-wheel, count: 10 }
+  - { item: electronic-circuit, count: 10 }
 output_save: state/saves/e0-bootstrap-v1.zip

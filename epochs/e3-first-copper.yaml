@@ -1,7 +1,7 @@
 id: e3-first-copper
 kind: composition
 depends_on: [e2-first-iron]
-input_save: state/saves/e2-first-iron-v1.zip
+input_save: state/saves/e2-first-iron/
 goal: |
   On top of the e2 save (which has e1's coal cell and e2's iron line both
   running), place a single copper-smelt-line module on a copper-ore patch
@@ -23,4 +23,4 @@ budgets:
   probe_timeout_ms: 600000
   design_timeout_ms: 600000
   execute_timeout_ms: 600000
-output_save: state/saves/e3-first-copper-v1.zip
+output_save: state/saves/e3-first-copper/
