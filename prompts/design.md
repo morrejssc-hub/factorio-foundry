@@ -306,6 +306,38 @@ contains an id that is not present in `lib/modules/`. The runner snapshot's
 this list before invoking you and tells you in the user message which ids
 must be authored. For each such id:
 
+**Before writing anything**, establish ground truth in this order:
+
+1. **Identify the recipe.** Read the goal: what item is the module supposed
+   to produce, from what inputs, in what kind of crafter? Use
+   `factorio_api_docs` to look up the recipe — note ingredients, products,
+   and the recipe's `category` (which determines whether it goes in
+   `assembling-machine-1`, `oil-refinery`, `chemical-plant`, `furnace`,
+   etc.). For a smelting recipe, no recipe field is needed (furnaces
+   auto-select); for everything else, the crafter requires
+   `settings: { recipe: "<recipe-id>" }` set in the blueprint (see step 2
+   below).
+
+2. **Identify the upstream production lines.** Read `state/world.md`'s
+   "Deployed modules" fence — each entry names a deployed module + its
+   anchor + its epoch. For each entry, read `lib/modules/<id>.yaml` to see
+   that module's `outputs:` ports. Those ports are your candidate input
+   sources. Their `kind` (belt / inventory / pipe) tells you how to
+   connect: belt-output ↔ belt-input is direct routing; inventory-output
+   (chest) → belt-input requires an inserter, OR you seed your input via
+   `starter_items`.
+
+3. **Pick an anchor.** Use `factorio_read tile-info` (or
+   `find-placement-anchors` for terrain-sensitive entities) to confirm
+   the tiles your full footprint will land on are buildable land — not
+   water, not on top of an existing module's footprint, not blocked. Do
+   this BEFORE writing the blueprint, not after — dry-validate will catch
+   collisions but burns a design retry.
+
+4. **Then write the files** below.
+
+For each id to author:
+
 1. **Write `staged-modules/<id>.yaml`** — a module definition with the same
    shape as `lib/modules/*.yaml`. Required fields:
 
@@ -402,6 +434,25 @@ must be authored. For each such id:
      drops at tile (4, 0). Use this to move items from belts into
      drills/furnaces and from furnace output into chests.
    - `iron-chest` is 1x1; just a passive store.
+   - `assembling-machine-1` is 3x3 with integer center (e.g. dx=0, dy=0
+     covers tiles -1..1 in x, -1..1 in y). It is **electric-powered** —
+     it must be within range of a `small-electric-pole` (or larger) on
+     an active electric network. CRITICAL: it requires a `recipe`
+     setting, otherwise it idles forever:
+     ```json
+     { "key": "asm", "item": "assembling-machine-1", "dx": 0, "dy": 0,
+       "direction": "north",
+       "settings": { "recipe": "iron-gear-wheel" } }
+     ```
+     The `recipe` field accepts any vanilla recipe id whose category is
+     `crafting` or `advanced-crafting`. For non-crafting recipes (oil,
+     chemicals), use `oil-refinery` / `chemical-plant` instead — same
+     `settings: { recipe: ... }` shape applies.
+   - `small-electric-pole` is 1x1, supplies power within a 7.5-tile
+     radius and connects to other poles within 5.5 tiles via wires.
+     Place one within range of every electric entity you author AND
+     within wire-range of an existing power network (typically e4's
+     steam-power-line poles — read `state/world.md` for its anchor).
    - The `footprint` field in your module yaml MUST be a bbox that covers
      every entity in the blueprint. dry-validate computes overlap on this
      bbox between placements.
