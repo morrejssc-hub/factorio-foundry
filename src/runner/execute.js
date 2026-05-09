@@ -13,8 +13,9 @@ import { piInvoke } from "../pi-invoke.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
 import { DIRECTION_NAMES } from "../geometry/schema.js";
 import { buildPlacementProposal, buildConnectionProposal } from "./executor-proposal.js";
+import { findPort } from "../lib-loader.js";
 
-async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
+export async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
   const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -41,7 +42,17 @@ async function executeBlueprint({ config, blueprint, anchor, direction, dryRun }
   });
 }
 
-async function placeOne({ config, placement, modules, log }) {
+// Pull blocked-tile positions out of an execute_blueprint precondition_failed
+// error payload. Returns [] if the error wasn't a placement-collision shape.
+function blockedPositionsFromError(error) {
+  const blocked = error?.payload?.blockedPlacements;
+  if (!Array.isArray(blocked)) return [];
+  return blocked
+    .map((b) => b?.position)
+    .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+}
+
+export async function placeOne({ config, placement, modules, log }) {
   const module = modules.get(placement.module);
   // Staged modules (newly authored in this run, not yet promoted to lib/)
   // pass the blueprint as an inline JSON object so the factorio service
@@ -62,24 +73,85 @@ async function placeOne({ config, placement, modules, log }) {
     blueprintLabel = blueprintLabelRaw;
   }
   log(`[execute] placement ${placement.id}: module=${module.id} anchor=(${placement.anchor.x},${placement.anchor.y}) direction=${placement.direction}`);
-  log(`[execute]   dryRun ${blueprintLabel}…`);
-  const dry = await executeBlueprint({
-    config,
-    blueprint: blueprintArg,
-    anchor: placement.anchor,
-    direction: placement.direction,
-    dryRun: true,
-  });
-  log(`[execute]   dryRun ok=${dry.ok ?? "n/a"} required=${JSON.stringify(dry.requiredItems || dry.required || {})}`);
-  log(`[execute]   placing live…`);
-  const live = await executeBlueprint({
-    config,
-    blueprint: blueprintArg,
-    anchor: placement.anchor,
-    direction: placement.direction,
-    dryRun: false,
-  });
-  return { dry, live };
+
+  const doPlace = async () => {
+    log(`[execute]   dryRun ${blueprintLabel}…`);
+    const dry = await executeBlueprint({
+      config, blueprint: blueprintArg,
+      anchor: placement.anchor, direction: placement.direction, dryRun: true,
+    });
+    log(`[execute]   dryRun ok=${dry.ok ?? "n/a"} required=${JSON.stringify(dry.requiredItems || dry.required || {})}`);
+    log(`[execute]   placing live…`);
+    const live = await executeBlueprint({
+      config, blueprint: blueprintArg,
+      anchor: placement.anchor, direction: placement.direction, dryRun: false,
+    });
+    return { dry, live };
+  };
+
+  try {
+    return await doPlace();
+  } catch (error) {
+    // Auto-clear: if the failure was canPlace=false at specific tiles, try
+    // mining natural debris (trees/rocks/biters/fish) under those tiles
+    // and retry once. Avoids burning an LLM-driven repair when the only
+    // obstacle is terrain. If clear_obstacles destroys nothing (e.g. tile
+    // is water, or a player-placed entity sits there), we let the error
+    // propagate to the regular repair path.
+    const positions = blockedPositionsFromError(error);
+    if (positions.length === 0) throw error;
+    log(`[execute]   ${positions.length} tile(s) blocked; trying clear_obstacles before repair`);
+    let cleared;
+    try {
+      cleared = await postAction(config, {
+        action: "clear_obstacles",
+        positions,
+        radius: 1.5,
+      });
+    } catch (clearError) {
+      log(`[execute]   clear_obstacles failed: ${clearError.message}; surfacing original placement error`);
+      throw error;
+    }
+    if (!cleared || !cleared.cleared) {
+      log(`[execute]   no natural obstacles at blocked tiles (${JSON.stringify(cleared?.by_type || {})}); not retrying`);
+      throw error;
+    }
+    log(`[execute]   cleared ${cleared.cleared} obstacles ${JSON.stringify(cleared.by_type || {})}; retrying placement`);
+    return await doPlace();
+  }
+}
+
+// plan.preparation runs before placements. Each entry currently supports
+// kind=deconstruct {position, entity?}. The verb stays minimal: destroy
+// whatever's on the tile (optionally name-filtered) and drop the items.
+// Designer prompt forbids this for natural debris (those are auto-cleared
+// at placement time) — preparation is reserved for player-placed teardown.
+export async function runPreparation({ config, plan, log }) {
+  const ops = Array.isArray(plan.preparation) ? plan.preparation : [];
+  if (ops.length === 0) return [];
+  const results = [];
+  for (const [i, op] of ops.entries()) {
+    if (op.kind === "deconstruct") {
+      const pos = op.position;
+      log(`[execute][prep] ${i}: deconstruct at (${pos?.x},${pos?.y})${op.entity ? ` name=${op.entity}` : ""}`);
+      try {
+        const r = await postAction(config, {
+          action: "deconstruct_at",
+          position: pos,
+          entity: op.entity,
+        });
+        log(`[execute][prep] ${i}: destroyed ${r.destroyed} (${(r.names || []).join(", ") || "—"})`);
+        results.push({ kind: "deconstruct", index: i, ok: true, destroyed: r.destroyed, names: r.names });
+      } catch (err) {
+        log(`[execute][prep] ${i}: failed: ${err.message}`);
+        results.push({ kind: "deconstruct", index: i, ok: false, error: err.message });
+        throw new Error(`preparation step ${i} (deconstruct) failed: ${err.message}`);
+      }
+    } else {
+      throw new Error(`preparation[${i}].kind '${op.kind}' is not supported (only 'deconstruct' for now)`);
+    }
+  }
+  return results;
 }
 
 async function repairWithPi({ config, epoch, plan, placement, error, outDir, log, stateYamlPath }) {
@@ -157,7 +229,7 @@ async function repairWithPi({ config, epoch, plan, placement, error, outDir, log
 //   East  (90° CW): (dx, dy) → (-dy,  dx)
 //   South (180°):   (dx, dy) → (-dx, -dy)
 //   West  (270° CW): (dx, dy) → ( dy, -dx)
-function rotateRelPos(dx, dy, direction) {
+export function rotateRelPos(dx, dy, direction) {
   switch ((direction || "north").toLowerCase()) {
     case "east":  return { x: -dy,  y:  dx };
     case "south": return { x: -dx,  y: -dy };
@@ -168,7 +240,7 @@ function rotateRelPos(dx, dy, direction) {
 
 // Resolve a port's world position for a given placement.
 // Returns null if the port name is not found in the module.
-function resolvePortWorldPos(placement, module, portName) {
+export function resolvePortWorldPos(placement, module, portName) {
   const port = [...(module.inputs || []), ...(module.outputs || [])].find((p) => p.name === portName);
   if (!port) return null;
   const [dx, dy] = port.rel_pos;
@@ -184,7 +256,7 @@ const TWO_BY_TWO_ENTITIES = new Set(["burner-mining-drill", "stone-furnace"]);
 // exit paths through gaps between entities, e.g. south of a belt stub.
 // routeBelt automatically removes start/goal from the set, so port tiles
 // are safe to include here.
-async function buildOccupiedTiles(plan, modules, rootDir) {
+export async function buildOccupiedTiles(plan, modules, rootDir) {
   const tiles = [];
   for (const p of (plan.placements || [])) {
     const mod = modules.get(p.module);
@@ -216,7 +288,7 @@ async function buildOccupiedTiles(plan, modules, rootDir) {
 //   { from: "p0.coal_belt", to: "p1.coal_in", required_throughput: 0.18 }
 // Connections without a dot (e.g. {from: "p0", to: "p1"}) are skipped —
 // they are informational-only annotations.
-async function routeConnections({ config, plan, modules, log }) {
+export async function routeConnections({ config, plan, modules, log }) {
   const placementById = new Map(plan.placements.map((p) => [p.id, p]));
   const occupied = await buildOccupiedTiles(plan, modules, config.rootDir);
   const connections = [];
@@ -247,6 +319,17 @@ async function routeConnections({ config, plan, modules, log }) {
     const toPos   = resolvePortWorldPos(toPlacement,   toModule,   toPort);
     if (!fromPos || !toPos) {
       log(`[execute][connect] skipping ${fromStr}→${toStr}: port not found (from=${!!fromPos} to=${!!toPos})`);
+      continue;
+    }
+
+    // Auto-routing is belt-only in V1. Pipe/power connections must live
+    // inside a single module, so skip cross-module pairs whose ports are
+    // not both kind: belt rather than emitting belts where they don't
+    // belong.
+    const fromKind = findPort(fromModule, fromPort)?.kind;
+    const toKind = findPort(toModule, toPort)?.kind;
+    if (fromKind !== "belt" || toKind !== "belt") {
+      log(`[execute][connect] skipping ${fromStr}→${toStr}: only belt-to-belt auto-routing supported in V1 (from=${fromKind} to=${toKind})`);
       continue;
     }
 
@@ -339,6 +422,16 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
   const log = (msg) => {
     console.log(msg);
   };
+  let preparationResults = [];
+  try {
+    preparationResults = await runPreparation({ config, plan, log });
+  } catch (prepError) {
+    await writeFile(join(outDir, "execute.json"), JSON.stringify({
+      ok: false, preparation: preparationResults, perPlacement: [],
+      error: prepError.message,
+    }, null, 2), "utf8");
+    throw prepError;
+  }
   const perPlacement = [];
   for (const placement of plan.placements) {
     try {
@@ -389,9 +482,10 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
   await copyFile(newest.path, savePathOut);
   await writeFile(join(outDir, "execute.json"), JSON.stringify({
     ok: true,
+    preparation: preparationResults,
     perPlacement,
     connections: connectionResults,
     save: savePathOut,
   }, null, 2), "utf8");
-  return { savePath: savePathOut, perPlacement };
+  return { savePath: savePathOut, perPlacement, preparation: preparationResults };
 }

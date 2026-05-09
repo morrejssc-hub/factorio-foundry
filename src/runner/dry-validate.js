@@ -13,6 +13,52 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { footprintOverlaps, findPort } from "../lib-loader.js";
 
+// Expand a placement → list of entities for can_place_entity. Mirrors
+// execute_blueprint's Lua behaviour exactly: position = anchor + (dx,dy),
+// direction taken straight from blueprint entity.direction. Placement-level
+// `direction` is currently ignored by the executor; if that changes, this
+// helper and the executor must change together.
+async function expandPlacementToEntities(placement, module) {
+  let blueprintJson;
+  if (module._staged && module._stagedBlueprintPath) {
+    blueprintJson = JSON.parse(await readFile(module._stagedBlueprintPath, "utf8"));
+  } else if (module.realization?.blueprint) {
+    blueprintJson = JSON.parse(await readFile(module.realization.blueprint, "utf8"));
+  } else {
+    return [];
+  }
+  const entities = Array.isArray(blueprintJson.entities) ? blueprintJson.entities : [];
+  return entities.map((e) => ({
+    item: String(e.item || e.type || e.name || ""),
+    name: e.entity || undefined,
+    position: { x: placement.anchor.x + Number(e.dx ?? 0), y: placement.anchor.y + Number(e.dy ?? 0) },
+    direction: String(e.direction || "north"),
+    placementId: placement.id,
+    entityKey: e.key || null,
+  }));
+}
+
+async function callValidatePlacement(config, entities) {
+  const response = await fetch(`${config.serviceUrl}/tool/factorio_read`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "query_script", script: "lib/validate-placement.lua", params: { entities } }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) {
+    throw new Error(`validate_placement HTTP ${response.status}: ${payload?.error || "unknown"}`);
+  }
+  // factorio_read returns { script, output, readonly }. The Lua probe
+  // rcon.print's a JSON object; output is that JSON string.
+  const raw = payload.result?.output ?? payload.output ?? "";
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`validate_placement: probe output not JSON: ${String(raw).slice(0, 200)}`);
+  }
+}
+
 function rotateOffset(rel, direction) {
   // direction: "north" | "east" | "south" | "west" — anchor-relative.
   // Module port rel_pos is defined in the canonical orientation; rotating
@@ -114,9 +160,13 @@ function checkConnections(plan, placedById, modules) {
  * @param {object} args.plan      — parsed plan.yaml
  * @param {Map<string, object>} args.modules — from loadAllModules
  * @param {string} args.outDir    — plans/<run>/ directory
- * @returns {Promise<{ok: boolean, errors: string[]}>}
+ * @param {object} [args.config]  — optional runner config; when provided
+ *   (config.serviceUrl), tile-aware can_place_entity is checked against the
+ *   live Factorio surface via the validate_placement probe. Skipped in
+ *   parallel-design candidate scoring where no instance is yet attached.
+ * @returns {Promise<{ok: boolean, errors: string[], canplace?: object}>}
  */
-export async function runDryValidate({ plan, modules, outDir }) {
+export async function runDryValidate({ plan, modules, outDir, config = null }) {
   const errors = [];
   if (!Array.isArray(plan.placements) || plan.placements.length === 0) {
     errors.push("plan.placements must be a non-empty array");
@@ -145,12 +195,54 @@ export async function runDryValidate({ plan, modules, outDir }) {
   }
   if (!("connections" in plan)) errors.push("plan missing required field: connections (use [] for none)");
 
+  // Tile-aware can_place check. Only run if the structural checks above
+  // passed AND a live Factorio config was passed in. Designer-side guarantees
+  // (entities don't overlap each other) are already validated; this catches
+  // entities that overlap *world tiles* — water, cliffs, existing structures
+  // from a previous epoch — which dry-validate cannot know about without
+  // talking to Factorio.
+  let canplaceReport = null;
+  if (errors.length === 0 && config?.serviceUrl) {
+    try {
+      const allEntities = [];
+      for (const p of placementResult.placed) {
+        const expanded = await expandPlacementToEntities(p.placement, p.module);
+        allEntities.push(...expanded);
+      }
+      if (allEntities.length > 0) {
+        const probe = await callValidatePlacement(config, allEntities);
+        canplaceReport = probe;
+        for (const r of probe.results || []) {
+          if (r.canPlace) continue;
+          const matched = allEntities.find((e) =>
+            e.position.x === r.position.x && e.position.y === r.position.y && (e.name || e.item) === r.name);
+          const pid = matched?.placementId ?? "?";
+          const key = matched?.entityKey ? ` (${matched.entityKey})` : "";
+          const tile = r.tile ? ` tile=${r.tile}` : "";
+          // Lua's helpers.table_to_json emits empty tables as {}, not [],
+          // so the field can arrive as an object — coerce defensively.
+          const rawBlockers = Array.isArray(r.blockingEntities) ? r.blockingEntities : [];
+          const blockers = rawBlockers.map((b) => b.name).filter((n) => n && n !== r.name);
+          const block = blockers.length ? ` blocked_by=[${[...new Set(blockers)].join(",")}]` : "";
+          errors.push(
+            `placement '${pid}': ${r.name}${key} cannot be placed at (${r.position.x},${r.position.y}) facing ${r.direction}${tile}${block}`,
+          );
+        }
+      }
+    } catch (err) {
+      // A probe failure is itself a dry-validate error — surfacing it is
+      // strictly better than silently skipping the check.
+      errors.push(`canplace probe failed: ${err.message}`);
+    }
+  }
+
   const ok = errors.length === 0;
   const verdict = { ok, errors, plan_summary: {
     placements: plan.placements?.length || 0,
     connections: plan.connections?.length || 0,
     expected_throughput: plan.expected_throughput,
   } };
+  if (canplaceReport) verdict.canplace = canplaceReport;
   await writeFile(resolve(outDir, "dry-validate.json"), JSON.stringify(verdict, null, 2), "utf8");
   return verdict;
 }

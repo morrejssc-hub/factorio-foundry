@@ -1,0 +1,92 @@
+{
+  "version": 2,
+  "name": "steam_power_line_v2",
+  "description": "Single steam-engine power plant: offshore-pump draws water at (dx=0, dy=-2), pipe at (dx=0, dy=-1) carries water to burner boiler at anchor, boiler burns coal to produce steam, steam-engine south of boiler generates electricity, small-electric-poles distribute power. Coal belt-fed from west via burner inserter. Module placed facing south.",
+  "anchor": "boiler center; must be placed on grass with offshore-pump (dx=0, dy=-2) landing on water",
+  "entities": [
+    {
+      "key": "boiler",
+      "item": "boiler",
+      "dx": 0,
+      "dy": 0,
+      "direction": "south",
+      "settings": { "fuel": { "item": "coal", "count": 1 } }
+    },
+    {
+      "key": "steam_engine",
+      "item": "steam-engine",
+      "dx": 0,
+      "dy": 1,
+      "direction": "south"
+    },
+    {
+      "key": "power_pole_1",
+      "item": "small-electric-pole",
+      "dx": 1,
+      "dy": 1,
+      "direction": "north"
+    },
+    {
+      "key": "pipe_water",
+      "item": "pipe",
+      "dx": 0,
+      "dy": -1,
+      "direction": "north"
+    },
+    {
+      "key": "offshore_pump",
+      "item": "offshore-pump",
+      "dx": 0,
+      "dy": -2,
+      "direction": "south"
+    },
+    {
+      "key": "coal_inserter",
+      "item": "burner-inserter",
+      "dx": -1,
+      "dy": 0,
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 1 } }
+    },
+    {
+      "key": "coal_belt_1",
+      "item": "transport-belt",
+      "dx": -2,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "coal_belt_2",
+      "item": "transport-belt",
+      "dx": -3,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "power_pole_2",
+      "item": "small-electric-pole",
+      "dx": 0,
+      "dy": 2,
+      "direction": "north"
+    }
+  ],
+  "ports": {
+    "coal_input": {
+      "entity": "coal_belt_2",
+      "kind": "belt",
+      "item": "coal"
+    },
+    "power_output": {
+      "entity": "power_pole_1",
+      "kind": "power",
+      "item": "electricity"
+    }
+  },
+  "assertions": [
+    "offshore_pump_placed_on_water",
+    "pipe_connects_pump_to_boiler_water_input",
+    "boiler_outputs_steam_to_steam_engine",
+    "coal_inserter_feeds_boiler_from_belt",
+    "steam_engine_connected_to_electric_network"
+  ]
+}

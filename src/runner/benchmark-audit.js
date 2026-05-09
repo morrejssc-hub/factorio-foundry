@@ -9,6 +9,10 @@ import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { rconExec, buildLuaCommand } from "../rcon.js";
+import { resolveAudit } from "./audit-resolver.js";
+import {
+  evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
+} from "./success-criteria.js";
 
 const TICKS_PER_SECOND = 60;
 
@@ -128,12 +132,37 @@ async function spawnBenchmark({ binaryPath, configIniPath, savePath, modsDir, wi
  * @param {string} args.outDir            — candidate dir; audit.json written here
  * @param {string} args.candidateSavePath — the .zip produced by execute phase
  */
-export async function runBenchmarkAudit({ config, factorio, targetMetric, outDir, candidateSavePath }) {
-  const scriptPath = resolve(config.rootDir, targetMetric.audit);
-  const params = targetMetric.params || {};
-  const item = params.item || "coal";
+export async function runBenchmarkAudit({ config, factorio, targetMetric, outDir, candidateSavePath, modules, plan, stagedDir, successCriteria }) {
+  const resolved = resolveAudit({
+    targetMetric, modules, plan, stagedDir,
+    rootDir: config.rootDir,
+  });
+  if (resolved.aggregate !== "rate_from_cumulative") {
+    throw new Error(
+      `benchmark-audit only supports aggregate=rate_from_cumulative; ` +
+      `audit '${resolved.auditId ?? "(legacy)"}' uses '${resolved.aggregate}'. ` +
+      `Disable benchmark mode (unset FOUNDRY_BENCHMARK_AUDIT and parallel) for this epoch.`,
+    );
+  }
+  const { scriptPath, params, item: resolvedItem } = resolved;
+  const item = resolvedItem || params.item || "coal";
   const windowTicks = params.window_ticks ?? 3600;
-  const minRatePerS = params.min_rate_per_s ?? 0;
+
+  // Resolve criteria. Benchmark mode runs offline so entity_exists can't
+  // hit a live world — reject criteria that need RCON introspection.
+  const criteria = (successCriteria && successCriteria.length > 0)
+    ? successCriteria
+    : (coerceLegacyCriteria({ targetMetric, defaultMetric: resolved.metric }).length > 0
+        ? coerceLegacyCriteria({ targetMetric, defaultMetric: resolved.metric })
+        : [{ kind: "nonzero", metric: resolved.metric }]);
+  validateCriteria(criteria);
+  const livenessCriterion = criteria.find((c) => c.kind === "entity_exists" || c.kind === "build_only");
+  if (livenessCriterion) {
+    throw new Error(
+      `benchmark-audit cannot evaluate criterion kind '${livenessCriterion.kind}' (no live world). ` +
+      `Disable benchmark mode for epochs that need entity introspection.`,
+    );
+  }
 
   const auditStart = Date.now();
 
@@ -184,11 +213,21 @@ export async function runBenchmarkAudit({ config, factorio, targetMetric, outDir
   const producedDelta = after.cumulative_produced - before.cumulative_produced;
   const seconds = tickDelta / TICKS_PER_SECOND;
   const measured = seconds > 0 ? producedDelta / seconds : 0;
-  const pass = measured >= minRatePerS;
+
+  const ctx = {
+    measured,
+    metric: resolved.metric,
+    snapshot: after || null,
+    executeOk: true,
+    countEntities: () => { throw new Error("entity introspection unavailable in benchmark mode"); },
+  };
+  const { pass, results: criteriaResults } = await evaluateCriteria(criteria, ctx);
+  const { threshold } = headlineThreshold(criteria);
 
   const verdict = {
     pass, item, measured,
-    threshold: minRatePerS,
+    threshold,
+    criteria: criteriaResults,
     window_ticks_requested: windowTicks,
     window_ticks_actual: tickDelta,
     seconds_actual: seconds,
@@ -196,7 +235,11 @@ export async function runBenchmarkAudit({ config, factorio, targetMetric, outDir
     wall_clock_ms,
     entity_count,
     before, after,
-    audit_script: targetMetric.audit,
+    audit_script: resolved.scriptRel,
+    metric: resolved.metric,
+    aggregate: resolved.aggregate,
+    module_id: resolved.moduleId,
+    audit_id: resolved.auditId,
     benchmark_mode: true,
     timestamp: new Date().toISOString(),
   };

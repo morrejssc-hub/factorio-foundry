@@ -40,7 +40,7 @@ async function ensureSymlink(target, linkPath) {
 // per-placement type checks (id/module/anchor/direction). The normalizer
 // absorbs Pattern B/C drift; only Pattern A (required fields actually
 // missing) triggers retry.
-function validatePlan(parsed, allowedModules) {
+export function validatePlan(parsed, allowedModules) {
   const { normalized, errors, warnings, unwrapped } = normalize(parsed, PLAN_SCHEMA);
   const allErrors = [...errors];
   if (normalized && Array.isArray(normalized.placements)) {
@@ -59,6 +59,30 @@ function validatePlan(parsed, allowedModules) {
       }
       if (!["north", "east", "south", "west"].includes(p.direction)) {
         allErrors.push(`placements[${i}].direction must be one of north/east/south/west`);
+      }
+    }
+  }
+  // preparation is optional, but if present every entry must be well-formed
+  // so the executor doesn't have to defend against shape drift at runtime.
+  if (normalized && normalized.preparation !== undefined) {
+    if (!Array.isArray(normalized.preparation)) {
+      allErrors.push("preparation must be an array");
+    } else {
+      for (const [i, op] of normalized.preparation.entries()) {
+        if (!op || typeof op !== "object") {
+          allErrors.push(`preparation[${i}] must be a mapping`);
+          continue;
+        }
+        if (op.kind !== "deconstruct") {
+          allErrors.push(`preparation[${i}].kind '${op.kind}' unsupported (only 'deconstruct' is implemented)`);
+          continue;
+        }
+        if (!op.position || !Number.isFinite(op.position.x) || !Number.isFinite(op.position.y)) {
+          allErrors.push(`preparation[${i}].position must be {x, y} with finite numbers`);
+        }
+        if (op.entity !== undefined && (typeof op.entity !== "string" || !op.entity)) {
+          allErrors.push(`preparation[${i}].entity must be a non-empty string when present`);
+        }
       }
     }
   }
@@ -228,7 +252,24 @@ async function validateStagedModules(stagedDir, expectedIds) {
       errors.push(`staged blueprint '${id}' must have a non-empty entities array`);
       continue;
     }
-    authored.push({ id, yamlPath, jsonPath, module });
+    // Module-creation epochs may need a fresh audit lua too. Any audits[]
+    // entry whose script path starts with `staged-modules/` must resolve to
+    // a real .lua file inside stagedDir; we record those for promotion.
+    const stagedAudits = [];
+    let auditError = false;
+    for (const a of (module.audits || [])) {
+      const rel = a.script || "";
+      if (!rel.startsWith("staged-modules/")) continue;
+      const base = rel.slice("staged-modules/".length);
+      if (!entries.includes(base)) {
+        errors.push(`staged module '${id}' audit '${a.id}' references ${rel} but file not found in staged-modules/`);
+        auditError = true;
+        continue;
+      }
+      stagedAudits.push({ auditId: a.id, basename: base, stagedPath: join(stagedDir, base) });
+    }
+    if (auditError) continue;
+    authored.push({ id, yamlPath, jsonPath, stagedAudits, module });
   }
   return { errors, authored };
 }
@@ -348,14 +389,20 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       `present in lib/modules/ and you MUST author them before plan.yaml:`,
       ...mustAuthorIds.map((id) => `  - ${id}`),
       ``,
-      `For each id, write two files into staged-modules/:`,
+      `For each id, write two (or three) files into staged-modules/:`,
       `  - staged-modules/<id>.yaml — module definition (use any existing`,
       `    lib/modules/*.yaml as a shape reference; declare id, version,`,
       `    inputs, outputs (with port name/side/rel_pos/throughput/item/kind),`,
       `    power, footprint (anchor-relative bbox covering all entities),`,
-      `    preconditions (resource_patch with min_tiles), realization`,
-      `    (blueprint: lib/blueprints/<id>.json — anticipates promotion),`,
-      `    audits.`,
+      `    preconditions, realization (blueprint: lib/blueprints/<id>.json`,
+      `    — anticipates promotion), audits.`,
+      `    audits[].metric MUST match the epoch.target_metric.metric when`,
+      `    the epoch uses goal-only target_metric. See prompts/design.md`,
+      `    "Authoring new modules" → "Choosing the audit script".`,
+      `  - staged-modules/<id>-audit.lua — ONLY when the metric is not an`,
+      `    item rate (e.g. power_kw, pollution_per_s). For item rates reuse`,
+      `    lib/audits/throughput-window.lua; do NOT write a new lua. The`,
+      `    custom audit script returns JSON {ok, tick, measured, ...}.`,
       `  - staged-modules/<id>.json — blueprint with anchor-relative dx/dy,`,
       `    direction per entity, optional fuel[] for pre-loaded burner items.`,
       `    Use existing lib/blueprints/*.json as a shape reference.`,

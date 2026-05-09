@@ -12,9 +12,10 @@
 --
 -- Response (JSON, single line):
 --   { ok, tick, worker_found, position:{x,y}, inventory:[{item,count}],
---     coal_patches, iron_patches, copper_patches, stone_patches,
+--     coal_patches, iron_patches, copper_patches, stone_patches, water_patches,
 --     world_inventory:[{ id, item, count, found:bool }] }
 -- Each patch: { center:{x,y}, tile_count:<int>, total_amount:<int> }
+-- Water patch: { center:{x,y}, tile_count:<int> } (no amount - water is infinite)
 -- Empty arrays serialize as [] (not null or {}).
 
 return {
@@ -123,6 +124,80 @@ return {
     local copper_patches = find_patches("copper-ore")
     local stone_patches  = find_patches("stone")
 
+    -- find_water_patches() → array of water tile clusters.
+    -- Water tiles (water, deepwater) are infinite resources - no amount field.
+    -- Uses same BFS clustering algorithm as resource patches.
+    -- Factorio 2.0: filter by tile name directly (collision_mask API changed).
+    local function find_water_patches()
+      local area = {{cx - radius, cy - radius}, {cx + radius, cy + radius}}
+      local water_tiles = surface.find_tiles_filtered{
+        area = area,
+        name = {"water", "deepwater", "water-green", "deepwater-green"}
+      }
+      if #water_tiles == 0 then return {} end
+
+      -- Build position set keyed by "x,y".
+      local pos_map = {}
+      local snapped = {}
+      for i = 1, #water_tiles do
+        local t = water_tiles[i]
+        local ix = math.floor(t.position.x + 0.5)
+        local iy = math.floor(t.position.y + 0.5)
+        local k = ix .. "," .. iy
+        if not pos_map[k] then
+          pos_map[k] = true
+          snapped[#snapped + 1] = {ix, iy}
+        end
+      end
+
+      -- BFS to find connected components.
+      local visited = {}
+      local patches = {}
+
+      for i = 1, #snapped do
+        local sx, sy = snapped[i][1], snapped[i][2]
+        local start_key = sx .. "," .. sy
+        if not visited[start_key] then
+          local comp = {}
+          local queue = {snapped[i]}
+          local qhead = 1
+          visited[start_key] = true
+
+          while qhead <= #queue do
+            local pos = queue[qhead]; qhead = qhead + 1
+            comp[#comp + 1] = pos
+            for dx = -cluster_gap, cluster_gap do
+              for dy = -cluster_gap, cluster_gap do
+                local nx = pos[1] + dx
+                local ny = pos[2] + dy
+                local nk = nx .. "," .. ny
+                if pos_map[nk] and not visited[nk] then
+                  visited[nk] = true
+                  queue[#queue + 1] = {nx, ny}
+                end
+              end
+            end
+          end
+
+          -- Compute centroid for this water patch.
+          local sum_x, sum_y = 0, 0
+          for _, t in ipairs(comp) do
+            sum_x = sum_x + t[1]
+            sum_y = sum_y + t[2]
+          end
+          local n = #comp
+          patches[#patches + 1] = {
+            center = {x = math.floor(sum_x / n + 0.5), y = math.floor(sum_y / n + 0.5)},
+            tile_count = n
+          }
+        end
+      end
+
+      return patches
+    end
+
+    local water_patches = find_water_patches()
+
     -- Query each chest registered in world.md's deployed-modules fence.
     -- We accept any container-typed entity at the given position; if none,
     -- emit found=false so the runner can flag a stale registry without
@@ -164,7 +239,7 @@ return {
       '"position":{"x":%g,"y":%g},' ..
       '"inventory":%s,' ..
       '"coal_patches":%s,"iron_patches":%s,' ..
-      '"copper_patches":%s,"stone_patches":%s,' ..
+      '"copper_patches":%s,"stone_patches":%s,"water_patches":%s,' ..
       '"world_inventory":%s}',
       game.tick,
       (worker ~= nil) and "true" or "false",
@@ -174,6 +249,7 @@ return {
       arr(iron_patches),
       arr(copper_patches),
       arr(stone_patches),
+      arr(water_patches),
       arr(world_inventory)
     ))
   end

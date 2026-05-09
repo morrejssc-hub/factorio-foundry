@@ -6,11 +6,15 @@
 import { readFile, readdir } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import {
+  ALL_KINDS, METERED_KINDS, PORT_CONNECTORS, PORT_CONTAINERS, isAllowedPortEntity,
+} from "./runner/port-entities.js";
 
 const REQUIRED_TOP = ["id", "version", "inputs", "outputs", "footprint", "realization"];
 const REQUIRED_OUTPUT = ["name", "rel_pos", "throughput", "item", "kind"];
 const REQUIRED_REALIZATION = ["blueprint"];
-const KIND_VALUES = new Set(["belt", "inventory", "pipe", "power"]);
+const KIND_VALUES = ALL_KINDS;
+const AGGREGATE_VALUES = new Set(["rate_from_cumulative", "snapshot_post", "snapshot_avg"]);
 
 function isFinitePair(value) {
   return Array.isArray(value)
@@ -55,6 +59,52 @@ function validateModule(module, file) {
     }
   }
 
+  // audits[] is optional but, if present, each entry must have id and
+  // EXACTLY ONE of {script, port}. The `port` form routes to the unified
+  // port-meter (lib/meters/port-meter.lua) and references a port declared
+  // in inputs/outputs by name. The `script` form is the legacy direct
+  // path; metric and aggregate are optional (rate_from_cumulative is the
+  // default for legacy throughput-window.lua-style scripts).
+  if (module.audits !== undefined) {
+    if (!Array.isArray(module.audits)) {
+      errors.push("audits must be an array");
+    } else {
+      const portIndex = new Map();
+      for (const port of [...(module.inputs || []), ...(module.outputs || [])]) {
+        if (port && typeof port.name === "string") portIndex.set(port.name, port);
+      }
+      const seenIds = new Set();
+      for (const [i, a] of module.audits.entries()) {
+        if (!a || typeof a !== "object") { errors.push(`audits[${i}] must be an object`); continue; }
+        if (typeof a.id !== "string" || !a.id) errors.push(`audits[${i}].id must be a non-empty string`);
+        else if (seenIds.has(a.id)) errors.push(`audits[${i}].id duplicate: ${a.id}`);
+        else seenIds.add(a.id);
+        const hasScript = typeof a.script === "string" && a.script.length > 0;
+        const hasPort = typeof a.port === "string" && a.port.length > 0;
+        if (hasScript && hasPort) {
+          errors.push(`audits[${i}] must declare either 'script' or 'port', not both`);
+        } else if (!hasScript && !hasPort) {
+          errors.push(`audits[${i}] must declare one of 'script' or 'port'`);
+        }
+        if (hasPort) {
+          const refPort = portIndex.get(a.port);
+          if (!refPort) {
+            errors.push(`audits[${i}].port '${a.port}' does not match any inputs[]/outputs[].name`);
+          } else if (!METERED_KINDS.has(refPort.kind)) {
+            errors.push(`audits[${i}].port '${a.port}' has kind '${refPort.kind}' — port-meter only supports ${[...METERED_KINDS].join(", ")}`);
+          }
+        }
+        if (a.metric !== undefined && typeof a.metric !== "string") errors.push(`audits[${i}].metric must be a string`);
+        if (a.aggregate !== undefined && !AGGREGATE_VALUES.has(a.aggregate)) {
+          errors.push(`audits[${i}].aggregate invalid: ${a.aggregate} (allowed: ${[...AGGREGATE_VALUES].join(",")})`);
+        }
+        if (a.params !== undefined && (typeof a.params !== "object" || Array.isArray(a.params))) {
+          errors.push(`audits[${i}].params must be an object`);
+        }
+      }
+    }
+  }
+
   if (errors.length) {
     throw new Error(`invalid module ${file}:\n  ${errors.join("\n  ")}`);
   }
@@ -67,6 +117,73 @@ export async function loadModule(modulePath) {
   return validateModule(parsed, modulePath);
 }
 
+/**
+ * Validate a parsed blueprint JSON against the port-entity registry.
+ * Each blueprint.ports[name] must (a) declare a kind in ALL_KINDS,
+ * (b) reference an entity-key that exists in entities[], and
+ * (c) the referenced entity's prototype must be allowed for that kind.
+ *
+ * @param {object} blueprint  — parsed blueprint object
+ * @param {string} blueprintPath  — for error messages
+ * @returns {void}  — throws on validation failure
+ */
+export function validateBlueprint(blueprint, blueprintPath) {
+  const errors = [];
+  if (!blueprint || typeof blueprint !== "object") {
+    throw new Error(`invalid blueprint ${blueprintPath}: not an object`);
+  }
+  const entities = Array.isArray(blueprint.entities) ? blueprint.entities : [];
+  const entityByKey = new Map();
+  for (const e of entities) {
+    if (e && typeof e.key === "string") entityByKey.set(e.key, e);
+  }
+  const ports = blueprint.ports;
+  if (ports !== undefined) {
+    if (typeof ports !== "object" || Array.isArray(ports)) {
+      errors.push("ports must be an object map");
+    } else {
+      for (const [portName, rec] of Object.entries(ports)) {
+        if (!rec || typeof rec !== "object") {
+          errors.push(`ports.${portName} must be an object`);
+          continue;
+        }
+        if (typeof rec.kind !== "string" || !ALL_KINDS.has(rec.kind)) {
+          errors.push(`ports.${portName}.kind '${rec.kind}' invalid (allowed: ${[...ALL_KINDS].join(",")})`);
+          continue;
+        }
+        if (typeof rec.entity !== "string" || !rec.entity) {
+          errors.push(`ports.${portName}.entity must be a non-empty entity key`);
+          continue;
+        }
+        const ent = entityByKey.get(rec.entity);
+        if (!ent) {
+          errors.push(`ports.${portName}.entity '${rec.entity}' not found in blueprint.entities[].key`);
+          continue;
+        }
+        if (typeof ent.item !== "string") {
+          errors.push(`ports.${portName} → entity '${rec.entity}' missing item field`);
+          continue;
+        }
+        if (!isAllowedPortEntity(rec.kind, ent.item)) {
+          const allowed = [...(PORT_CONNECTORS[rec.kind] || []), ...(PORT_CONTAINERS[rec.kind] || [])];
+          errors.push(`ports.${portName}: entity '${ent.item}' not allowed for kind '${rec.kind}' (allowed: ${allowed.join(", ")})`);
+        }
+      }
+    }
+  }
+  if (errors.length) {
+    throw new Error(`invalid blueprint ${blueprintPath}:\n  ${errors.join("\n  ")}`);
+  }
+}
+
+/**
+ * Resolve a blueprint path relative to the lib root (libDir's parent).
+ * Yaml's realization.blueprint is `lib/blueprints/<id>.json` — repo-rooted.
+ */
+function resolveBlueprintPath(libDir, blueprintRel) {
+  return resolve(libDir, "..", blueprintRel);
+}
+
 export async function loadAllModules(libDir) {
   const dir = resolve(libDir, "modules");
   const entries = await readdir(dir);
@@ -77,6 +194,19 @@ export async function loadAllModules(libDir) {
     const module = await loadModule(modulePath);
     if (out.has(module.id)) {
       throw new Error(`duplicate module id ${module.id} in ${modulePath}`);
+    }
+    const blueprintRel = module.realization?.blueprint;
+    if (blueprintRel) {
+      const blueprintPath = resolveBlueprintPath(libDir, blueprintRel);
+      try {
+        const text = await readFile(blueprintPath, "utf8");
+        validateBlueprint(JSON.parse(text), blueprintPath);
+      } catch (err) {
+        // Missing-file is tolerated: the runner re-checks at place_blueprint
+        // time. Tests use synthetic paths that don't exist on disk. Real
+        // shape errors in an existing blueprint still throw.
+        if (err.code !== "ENOENT") throw err;
+      }
     }
     out.set(module.id, { ...module, _path: modulePath });
   }
@@ -119,11 +249,26 @@ export async function loadAllModulesWithStaged(libDir, stagedDir) {
     const blueprintBase = blueprintRel.split("/").pop();
     const stagedBlueprint = join(stagedDir, blueprintBase);
     let stagedBlueprintExists = true;
+    let blueprintTextForValidation = null;
     try {
-      await readFile(stagedBlueprint, "utf8");
+      blueprintTextForValidation = await readFile(stagedBlueprint, "utf8");
     } catch (error) {
       if (error.code === "ENOENT") stagedBlueprintExists = false;
       else throw error;
+    }
+    if (!stagedBlueprintExists && blueprintRel) {
+      const libBlueprintPath = resolveBlueprintPath(libDir, blueprintRel);
+      try {
+        blueprintTextForValidation = await readFile(libBlueprintPath, "utf8");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    if (blueprintTextForValidation) {
+      validateBlueprint(
+        JSON.parse(blueprintTextForValidation),
+        stagedBlueprintExists ? stagedBlueprint : resolveBlueprintPath(libDir, blueprintRel),
+      );
     }
     const tagged = {
       ...module,

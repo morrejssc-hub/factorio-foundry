@@ -5,9 +5,26 @@ You are running the **Design phase** of a Factorio epoch.
 You cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
 `ls`, `factorio_api_docs`, and `factorio_read`. Use `factorio_read` with the
 probe scripts in `lib/probes/` to inspect the live world when `state.yaml`
-alone is insufficient (e.g. to validate a candidate anchor with
-`validate-placement.lua` or scan tile clearance with `tile-info.lua`). Do
-NOT call `factorio_action` — any mutation attempt is a violation.
+alone is insufficient. The two placement-related probes you should know
+about:
+
+- `lib/probes/find-placement-anchors.lua` — **enumerate** legal anchors
+  for a given prototype within a region. Use this BEFORE proposing
+  positions for terrain-sensitive entities: offshore-pump, burner- or
+  electric-mining-drill, pumpjack. Pass `{entity, region, mode}` where
+  `mode: "edge"` walks only the bbox perimeter (offshore-pump on a water
+  patch — pass the water-patch bbox inflated by 1 tile so the perimeter
+  straddles the shoreline) and `mode: "raw"` scans the bbox interior
+  (miner on a coal patch). Returns candidates grouped by `(x, y)` with
+  the list of valid `directions` per position; pick one. `total_found`
+  tells you how many existed before the `max_results` truncation.
+- `lib/probes/validate-placement.lua` — **verify** a specific list of
+  `{entities:[{name,position,direction}]}` plays as a complete blueprint
+  (no overlaps, all tiles legal). Use this AFTER you have candidate
+  anchors to confirm the full layout fits.
+
+`tile-info.lua` is also useful for ad-hoc tile-name / entity inspection.
+Do NOT call `factorio_action` — any mutation attempt is a violation.
 
 ## Inputs available in your working directory
 
@@ -44,6 +61,7 @@ epoch** if any are missing. Each placement is also schema-checked.
 | `connections`         | yes      | array (use `[]` if none) of `{from, to, required_throughput}` — see "Connections" below |
 | `expected_throughput` | yes      | number — items/s your plan delivers of the target item                                |
 | `scaling_note`        | yes      | string — one sentence describing your scaling decision                                |
+| `preparation`         | optional | array of teardown ops run BEFORE placements — see "Tearing down" below                |
 | `extra`               | optional | open mapping — see "When to use `extra:`" below                                       |
 
 **You are NOT writing a project plan, a runbook, or a step list.** You are
@@ -109,6 +127,12 @@ connections:
 - Ports of kind `belt` connect via transport-belt routes. The executor
   resolves world positions from each module's `rel_pos` (anchor-relative,
   canonical north orientation, rotated by `direction` at placement time).
+- Connections of kind `pipe` or `power` are NOT auto-routed in V1.
+  Multi-module electric or fluid plans must keep their pump→boiler→engine
+  or pole-network chain inside a single module. The executor logs and
+  skips any cross-module `from`/`to` pair whose ports aren't both `belt`,
+  so a stray pipe/power connection won't fail your epoch — it just won't
+  be wired.
 - Check that the worker's inventory contains enough transport-belts for the
   route length (estimate: Manhattan distance between the two port positions).
 
@@ -225,6 +249,43 @@ the 3-key decomposition schema (`mode`, `epoch`, `subs`).
 - You're not sure → use plan.yaml. Decomposition is opt-in, single-mode
   is the default.
 
+## Tearing down
+
+The world your epoch starts in may already contain entities from prior
+epochs. If your placements would overlap an old burner-drill or a stray
+inserter, the executor will fail with `canPlace=false` and your epoch
+fails — there is no automatic deconstruction of player-placed
+infrastructure.
+
+**Natural debris is NOT your concern.** Trees, rocks, fish, and biter
+spawners are auto-cleared by the executor when they block a tile (it
+inspects the blocked tiles, mines anything natural under them, retries
+the placement once). Do NOT enumerate them in `preparation:`.
+
+**Player-placed entities are your concern.** When `state.yaml` shows an
+old chest, drill, or belt sitting where your new placement needs to go,
+declare an explicit teardown:
+
+```yaml
+preparation:
+  - kind: deconstruct
+    position: { x: -50, y: -85 }   # tile center of the entity to remove
+    entity: burner-mining-drill    # optional name filter; omit to wipe whatever is there
+  - kind: deconstruct
+    position: { x: -49, y: -85 }
+```
+
+Each entry runs in order, before any placement. The executor destroys
+the entity at the tile and drops its items. Use sparingly — every
+`deconstruct` is a real-world side effect that erases prior work, so
+declare them only when you've confirmed via `state.yaml` /
+`factorio_read inspect_position` that the tile is occupied by something
+you intend to remove.
+
+For this iteration, `preparation` only supports `kind: deconstruct`.
+Future kinds (`upgrade`, `clear_region`) are not yet implemented; do
+not invent them.
+
 ## When to use `extra:`
 
 `extra:` is a sanctioned, **open** mapping for anything that doesn't fit the
@@ -254,7 +315,7 @@ must be authored. For each such id:
    inputs: []
    outputs:
      - { name: <port-name>, side: east, rel_pos: [<x>, <y>],
-         throughput: <number>, item: <factorio-item-name>, kind: belt|inventory }
+         throughput: <number>, item: <factorio-item-name>, kind: belt|inventory|pipe|power }
    power: { kind: burner, fuel: coal, self_sufficient: <bool> }
    footprint:
      min: [<x>, <y>]    # axis-aligned bbox covering ALL entities
@@ -267,10 +328,51 @@ must be authored. For each such id:
    realization:
      blueprint: lib/blueprints/<id>.json   # path AFTER promotion
    audits:
-     - id: <id>-throughput
-       script: lib/audits/throughput-window.lua
-       params: { item: <factorio-item-name>, min_rate_per_s: <number>, window_ticks: 3600 }
+     - id: <id>-meter                    # an id unique within this module
+       port: <port-name>                 # name from inputs[]/outputs[] above
+       metric: <metric-label>            # MUST equal epoch.target_metric.metric
+       aggregate: rate_from_cumulative   # or snapshot_post / snapshot_avg
+       params: { window_ticks: 3600 }
    ```
+
+   **Port kinds and the entity registry.** Each port must declare a `kind`
+   matching one of the Factorio entity classes the runner knows how to
+   measure or place a harness on:
+
+   | kind        | port entity (in your blueprint)                                                            | runner-side meter                                |
+   |-------------|--------------------------------------------------------------------------------------------|--------------------------------------------------|
+   | `belt`      | one of `transport-belt`, `fast-transport-belt`, `express-transport-belt`                   | item rate produced (items/s)                     |
+   | `pipe`      | `pipe`                                                                                     | fluid rate produced (fluid/s)                    |
+   | `power`     | one of `small-electric-pole`, `medium-electric-pole`, `big-electric-pole`, `substation`    | electric power on the port's network (kW)        |
+   | `inventory` | one of `wooden-chest`, `iron-chest`, `steel-chest`                                         | not metered in V1; declare for chest-output ports|
+
+   The blueprint's `ports{}` map must agree: each entry's `entity` key
+   must point to a blueprint entity whose `item` is in the kind's
+   allowlist above. `kind: electric` is NOT valid — use `kind: power`.
+
+   **Choosing a port-meter audit.** For `kind: belt|pipe|power` you
+   declare `port: <port-name>` (no `script:` field). The runner routes
+   the audit through `lib/meters/port-meter.lua`, which switches on the
+   port's kind and reads from the actual port entity at the placement's
+   world position. You do NOT author Lua audit scripts for these kinds.
+
+   - `metric` is the label downstream tools key off of (e.g. `coal_per_s`,
+     `power_kw`); it MUST match `epoch.target_metric.metric` when the
+     epoch uses goal-only mode.
+   - `aggregate`: pick `rate_from_cumulative` for items / fluids /
+     electric (the meter returns cumulative produced; runner divides by
+     seconds). Use `snapshot_post` only for already-rate metrics.
+
+   **Exotic metrics (pollution, heat, custom counters).** Only when the
+   metric isn't covered by belt/pipe/power do you author a custom Lua
+   audit:
+
+   - Write `staged-modules/<id>-audit.lua`, reference it as
+     `script: staged-modules/<id>-audit.lua` (not `port:`).
+   - The script returns JSON `{ ok, tick, measured, ... }` where
+     `measured` is on the metric's natural scale.
+   - The runner promotes it to `lib/audits/<id>-audit.lua` on audit
+     pass and rewrites the path automatically.
 
    Read any existing `lib/modules/*.yaml` to confirm the shape; the
    lib-loader's `validateModule` runs against your file post-exit and

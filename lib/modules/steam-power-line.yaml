@@ -1,0 +1,48 @@
+# steam-power-line
+#
+# Single steam-engine power plant. Offshore-pump draws water from a
+# shoreline tile, pipe carries water to a burner boiler, boiler heats
+# water to steam, steam-engine converts steam to electricity, small
+# electric poles distribute power.
+#
+# Anchor: boiler center. Must be placed with direction "south" so the
+# boiler's steam output faces into the steam-engine. Offshore-pump
+# sits 2 tiles north of the boiler — the anchor must be picked so
+# (anchor.x + 0, anchor.y - 2) lands on water.
+
+id: steam-power-line
+version: 1
+
+inputs:
+  - { name: coal_belt, side: west, rel_pos: [-3.5, 0], throughput: 0.5, item: coal, kind: belt }
+
+outputs:
+  - { name: power_output, side: south, rel_pos: [0.5, 2.5], throughput: 900, item: electricity, kind: power }
+
+power: { kind: produced, source: steam-engine }
+
+# Footprint covers all entities. coal_belt_2 at x=-3, pipe/pump at y=-2,
+# steam-engine at y=+1, power_pole_2 at y=+2. Boiler is 2x2 so extends
+# ±1 from center in both axes.
+footprint:
+  min: [-3.5, -2.5]
+  max: [1.5, 2.5]
+
+preconditions:
+  - kind: water_source
+    description: "offshore-pump must be on a water tile; anchor positioned so pump (dx=0, dy=-2) lands on water"
+
+realization:
+  blueprint: lib/blueprints/steam-power-line.json
+  starter_fuel:
+    - { item: coal, count: 10 }   # bootstrap boiler before belt feed stabilises
+
+# Port-meter audit: dispatcher reads electric_network_statistics on the
+# pole at the power_output port. No per-module Lua needed.
+audits:
+  - id: steam-power-line-power
+    port: power_output
+    metric: power_kw
+    aggregate: rate_from_cumulative
+    params:
+      window_ticks: 3600

@@ -163,6 +163,7 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
   const extra = {};
   if (census.copper_patches?.length) extra.copper_patches = census.copper_patches;
   if (census.stone_patches?.length)  extra.stone_patches  = census.stone_patches;
+  if (census.water_patches?.length)  extra.water_patches  = census.water_patches;
 
   const stateRaw = {
     tick:              census.tick,
@@ -170,6 +171,7 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
     inventory_summary: census.inventory ?? [],
     coal_patches:      census.coal_patches ?? [],
     iron_patches:      census.iron_patches ?? [],
+    water_patches:     census.water_patches ?? [],
     ...(census.world_inventory?.length ? { world_inventory: census.world_inventory } : {}),
     notes:             `Deterministic probe (world-census.lua). ${params.radius}-tile radius.`,
     ...(Object.keys(extra).length > 0 ? { extra } : {}),

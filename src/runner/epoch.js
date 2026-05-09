@@ -1,10 +1,10 @@
-// epoch.js — orchestrator for the 5-phase epoch loop.
+// epoch.js — orchestrator for the epoch loop.
 //
 // Two epoch kinds:
 //   - bootstrap: deterministic. Creates a fresh save, ensures worker, stocks
-//     starter inventory. No probe / design / audit phases.
-//   - composition: full 5-phase loop (probe → design → dry-validate →
-//     execute → audit). Operates on an input save, produces an output save.
+//     starter inventory. No probe / design / verify phases.
+//   - composition: full pipeline (probe → design → verify → execute → observe → record).
+//     Operates on an input save, produces an output save.
 import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -13,9 +13,9 @@ import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
+import { runVerify } from "./verify.js";
 import { runExecute } from "./execute.js";
 import { runAudit } from "./audit.js";
-import { runBenchmarkAudit } from "./benchmark-audit.js";
 import { InstancePool } from "./instance-pool.js";
 import { writeSummary } from "./run-summary.js";
 import {
@@ -201,41 +201,53 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         plan: designResult.plan,
         modules,
         outDir: candDir,
+        config,
       });
       if (!dryResult.ok) throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
       log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
 
-      log(`[epoch ${epoch.id}] attempt ${attempt}: execute`);
-      exResult = await runExecute({
+      log(`[epoch ${epoch.id}] attempt ${attempt}: verify`);
+      const verifyResult = await runVerify({
         config,
+        factorio,
         epoch,
         plan: designResult.plan,
         modules,
         outDir: executeOut,
-        savePathOut: candidateSavePath,
         stateYamlPath: probeResult.stateYamlPath,
       });
-      log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
-
-      log(`[epoch ${epoch.id}] attempt ${attempt}: audit${config.benchmarkAudit ? " (benchmark)" : ""}`);
-      verdict = config.benchmarkAudit
-        ? await runBenchmarkAudit({
-            config,
-            factorio,
-            targetMetric: epoch.target_metric,
-            outDir: candDir,
-            candidateSavePath,
-          })
-        : await runAudit({
-            config,
-            targetMetric: epoch.target_metric,
-            outDir: candDir,
-          });
-      log(`[epoch ${epoch.id}] attempt ${attempt}: audit verdict: pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
+      verdict = verifyResult.verdict;
+      log(`[epoch ${epoch.id}] attempt ${attempt}: verify ok — pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
       lastVerdict = verdict;
 
       if (verdict.pass) {
-        winning = { designResult, modules, exResult, verdict, stagedDir, attempt };
+        // Reload clean world from input save for final execute (no harness)
+        log(`[epoch ${epoch.id}] attempt ${attempt}: execute (clean save)`);
+        await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+        exResult = await runExecute({
+          config,
+          epoch,
+          plan: designResult.plan,
+          modules,
+          outDir: executeOut,
+          savePathOut: candidateSavePath,
+          stateYamlPath: probeResult.stateYamlPath,
+        });
+        log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
+
+        // Observe: measure the clean save without harness (same meter as verify)
+        log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
+        const observeVerdict = await runAudit({
+          config,
+          targetMetric: epoch.target_metric,
+          successCriteria: epoch.success_criteria,
+          outDir: candDir,
+          modules,
+          plan: designResult.plan,
+          stagedDir,
+        });
+        log(`[epoch ${epoch.id}] attempt ${attempt}: observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
+        winning = { designResult, modules, exResult, verdict, observeVerdict, stagedDir, attempt };
       } else {
         previousAttempts.push({
           attempt,
@@ -310,7 +322,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       placements: designResult?.plan?.placements?.length ?? null,
       authored: designResult?.authored?.map((a) => a.id) ?? [],
       dry_validate: dryResult ? { ok: dryResult.ok, errors: dryResult.errors ?? [] } : null,
-      execute: exResult ? { ok: exResult.ok, save_path: exResult.savePath } : null,
+      execute: exResult ? { ok: !!exResult.savePath, save_path: exResult.savePath } : null,
       audit: verdict ? {
         pass: verdict.pass,
         measured: verdict.measured,
@@ -386,8 +398,30 @@ async function promoteStagedModules({ config, authored, log, epochId }) {
   for (const a of authored) {
     const moduleDest = resolve(config.libDir, "modules", `${a.id}.yaml`);
     const blueprintDest = resolve(config.libDir, "blueprints", `${a.id}.json`);
-    await copyFile(a.yamlPath, moduleDest);
     await copyFile(a.jsonPath, blueprintDest);
+    const promotedAudits = [];
+    for (const sa of (a.stagedAudits || [])) {
+      const auditDest = resolve(config.libDir, "audits", sa.basename);
+      await copyFile(sa.stagedPath, auditDest);
+      promotedAudits.push({ ...sa, libRel: `lib/audits/${sa.basename}` });
+      log(`[epoch ${epochId}] promoted audit '${sa.auditId}' → ${auditDest}`);
+    }
+    // Rewrite the yaml's audits[].script entries that pointed at staged-modules/
+    // so the promoted module yaml references the lib path. Without this, the
+    // next epoch's lib-load would point at a non-existent staged-modules/ dir.
+    let yamlText = await readFile(a.yamlPath, "utf8");
+    if (promotedAudits.length > 0) {
+      const parsed = parseYaml(yamlText);
+      for (const audit of (parsed.audits || [])) {
+        if (typeof audit.script !== "string") continue;
+        if (!audit.script.startsWith("staged-modules/")) continue;
+        const base = audit.script.slice("staged-modules/".length);
+        const pa = promotedAudits.find((p) => p.basename === base);
+        if (pa) audit.script = pa.libRel;
+      }
+      yamlText = stringifyYaml(parsed);
+    }
+    await writeFile(moduleDest, yamlText, "utf8");
     log(`[epoch ${epochId}] promoted staged module '${a.id}' → ${moduleDest} + ${blueprintDest}`);
   }
 }
@@ -556,7 +590,7 @@ async function runOneDesign(idx, { config, epoch, probeResult, runDir, log }) {
   return { idx, cid, candDir, designOut, stagedDir, designResult, modules, dryResult, designError };
 }
 
-async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult }) {
+async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult, inputSave }) {
   const { idx, cid, candDir, designOut, stagedDir, designResult, modules, designError } = design;
   const candidateSavePath = runSavePath(saveDir, runTs, cid);
   const executeOut = join(candDir, "execute");
@@ -578,27 +612,17 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
 
   const slot = await pool.acquire();
   try {
-    log(`[epoch ${epoch.id}] [${cid}] execute (slot ${slot.index})`);
-    const exResult = await runExecute({
+    log(`[epoch ${epoch.id}] [${cid}] verify (slot ${slot.index})`);
+    const verifyResult = await runVerify({
       config: slot.config,
+      factorio: slot.factorio,
       epoch,
       plan: designResult.plan,
       modules,
       outDir: executeOut,
-      savePathOut: candidateSavePath,
       stateYamlPath: probeResult?.stateYamlPath,
     });
-    record.execute = { ok: exResult.ok ?? true, save_path: exResult.savePath };
-    log(`[epoch ${epoch.id}] [${cid}] execute ok — save=${exResult.savePath}`);
-
-    log(`[epoch ${epoch.id}] [${cid}] audit (benchmark)`);
-    const verdict = await runBenchmarkAudit({
-      config: slot.config,
-      factorio: slot.factorio,
-      targetMetric: epoch.target_metric,
-      outDir: candDir,
-      candidateSavePath,
-    });
+    const verdict = verifyResult.verdict;
     record.audit = {
       pass: verdict.pass,
       measured: verdict.measured,
@@ -609,10 +633,40 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
       window_ticks_actual: verdict.window_ticks_actual,
       timestamp: verdict.timestamp,
     };
-    log(`[epoch ${epoch.id}] [${cid}] audit verdict: pass=${verdict.pass} measured=${verdict.measured}`);
+    log(`[epoch ${epoch.id}] [${cid}] verify ok — pass=${verdict.pass} measured=${verdict.measured}`);
+
+    if (verdict.pass) {
+      // Reload clean world from input save for final execute (no harness)
+      await ensureFactorioStartedFromSave({ factorio: slot.factorio, savePath: inputSave });
+      log(`[epoch ${epoch.id}] [${cid}] execute (clean save, slot ${slot.index})`);
+      const exResult = await runExecute({
+        config: slot.config,
+        epoch,
+        plan: designResult.plan,
+        modules,
+        outDir: executeOut,
+        savePathOut: candidateSavePath,
+        stateYamlPath: probeResult?.stateYamlPath,
+      });
+      record.execute = { ok: true, save_path: exResult.savePath };
+      log(`[epoch ${epoch.id}] [${cid}] execute ok — save=${exResult.savePath}`);
+
+      // Observe: measure the clean save without harness
+      log(`[epoch ${epoch.id}] [${cid}] observe`);
+      const observeVerdict = await runAudit({
+        config: slot.config,
+        targetMetric: epoch.target_metric,
+        successCriteria: epoch.success_criteria,
+        outDir: candDir,
+        modules,
+        plan: designResult.plan,
+        stagedDir,
+      });
+      log(`[epoch ${epoch.id}] [${cid}] observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
+    }
   } catch (err) {
     record.error = err.message;
-    log(`[epoch ${epoch.id}] [${cid}] execute/audit failed: ${err.message}`);
+    log(`[epoch ${epoch.id}] [${cid}] verify/execute failed: ${err.message}`);
   } finally {
     pool.release(slot);
   }
@@ -662,7 +716,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
     // Parallel execute + benchmark audit.
     log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
     attemptRecords = await Promise.all(
-      designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult })),
+      designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult, inputSave })),
     );
   } finally {
     await pool.shutdown();

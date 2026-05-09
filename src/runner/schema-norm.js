@@ -126,18 +126,25 @@ export function normalize(parsed, schema) {
 
 export const STATE_SCHEMA = {
   required: ["tick", "worker", "inventory_summary", "coal_patches", "iron_patches"],
-  optional: { notes: "", extra: {}, world_inventory: [] },
+  optional: { notes: "", extra: {}, world_inventory: [], water_patches: [], copper_patches: [], stone_patches: [] },
   wrappers: ["probe", "state", "result", "data", "output", "findings"],
   aliases: {
     coal_patch: "coal_patches",
     iron_patch: "iron_patches",
     inventory: "inventory_summary",
+    water_patch: "water_patches",
+    copper_patch: "copper_patches",
+    stone_patch: "stone_patches",
   },
 };
 
 export const PLAN_SCHEMA = {
   required: ["epoch", "placements", "connections", "expected_throughput", "scaling_note"],
-  optional: { extra: {} },
+  // preparation: optional teardown/upgrade ops the executor runs BEFORE
+  // placements. Currently only kind=deconstruct is supported. Natural
+  // debris (trees/rocks/biters) is auto-cleared by the executor on
+  // canPlace=false; preparation is for player-placed entities only.
+  optional: { extra: {}, preparation: [] },
   wrappers: ["plan", "design", "result", "data", "output"],
   aliases: {},
 };

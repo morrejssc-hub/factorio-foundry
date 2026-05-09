@@ -87,6 +87,13 @@ const MUTATING_ACTIONS = new Set([
   "connect_belt",
   "connect_power",
   "wait_ticks",
+  "clear_obstacles",
+  "deconstruct_at",
+  "place_harness",
+  "harness_tick",
+  "harness_teardown",
+  "power_harness_setup",
+  "power_harness_teardown",
 ]);
 const PLACEABLE_ITEMS = new Map([
   ["stone-furnace", "stone-furnace"],
@@ -110,6 +117,23 @@ const PLACEABLE_ITEMS = new Map([
   ["assembling-machine-1", "assembling-machine-1"],
 ]);
 const ENTITY_TO_ITEM = new Map([...PLACEABLE_ITEMS.entries()].map(([item, entity]) => [entity, item]));
+// Add non-placeable mineable entities (trees, rocks, etc.)
+// Factorio has many tree variants: tree-01 through tree-09 with color suffixes
+ENTITY_TO_ITEM.set("tree-01", "wood");
+ENTITY_TO_ITEM.set("tree-02", "wood");
+ENTITY_TO_ITEM.set("tree-03", "wood");
+ENTITY_TO_ITEM.set("tree-04", "wood");
+ENTITY_TO_ITEM.set("tree-05", "wood");
+ENTITY_TO_ITEM.set("tree-06", "wood");
+ENTITY_TO_ITEM.set("tree-07", "wood");
+ENTITY_TO_ITEM.set("tree-08", "wood");
+ENTITY_TO_ITEM.set("tree-09", "wood");
+ENTITY_TO_ITEM.set("dead-tree", "wood");
+ENTITY_TO_ITEM.set("dead-tree-trunk", "wood");
+ENTITY_TO_ITEM.set("dry-tree", "wood");
+ENTITY_TO_ITEM.set("rock-huge", "stone");
+ENTITY_TO_ITEM.set("rock-big", "stone");
+ENTITY_TO_ITEM.set("sand-rock-big", "stone");
 
 // Per-entity runtime settings applied after placement. Each setting key
 // names the action; the value is the per-entity item allowlist. Adding a
@@ -733,6 +757,7 @@ export class FactorioServer {
     await this.waitReady();
     await this.confirmLuaConsole();
     await this.ensureSimulationAdvances();
+    await this.ensureHarnessForce();
   }
 
   async waitReady(timeoutMs = 120000) {
@@ -3426,6 +3451,439 @@ print_inventory(worker_inv)
     return { beforeTick, afterTick, elapsedTicks: afterTick - beforeTick };
   }
 
+  // Bulk-clear "natural" world debris that can block deterministic placement:
+  // trees, rocks (simple-entity), fish, and biter spawners. Not worker-bound —
+  // the runner orchestrates this directly when execute_blueprint reports
+  // canPlace=false against tiles where these things sit. Items are NOT
+  // returned to inventory (this isn't a mining action; it's terrain cleanup).
+  async clearObstacles(input) {
+    const positions = Array.isArray(input?.positions) ? input.positions : [];
+    if (positions.length === 0) {
+      return { cleared: 0, by_type: {} };
+    }
+    for (const p of positions) {
+      if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) {
+        throw new Error("clear_obstacles: each position must have finite x, y");
+      }
+    }
+    const radius = Number.isFinite(input?.radius) ? Math.max(0.5, Math.min(8, input.radius)) : 1.5;
+    const surface = String(input?.surface || "nauvis");
+    const types = Array.isArray(input?.types) && input.types.length > 0
+      ? input.types.map((t) => String(t))
+      : ["tree", "simple-entity", "fish", "unit-spawner"];
+    const body = `
+local positions = ${luaValue(positions)}
+local radius = ${radius}
+local types = ${luaValue(types)}
+local surface = game.surfaces[${luaValue(surface)}]
+if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
+
+local total = 0
+local by_type = {}
+local seen = {}
+for _, pos in ipairs(positions) do
+  local entities = surface.find_entities_filtered{
+    area = {{pos.x - radius, pos.y - radius}, {pos.x + radius, pos.y + radius}},
+    type = types,
+  }
+  for _, e in ipairs(entities) do
+    if e.valid and not seen[e.unit_number or e] then
+      seen[e.unit_number or e] = true
+      local t = e.type
+      by_type[t] = (by_type[t] or 0) + 1
+      e.destroy()
+      total = total + 1
+    end
+  end
+end
+rcon.print("ok=true")
+rcon.print("cleared=" .. total)
+for t, n in pairs(by_type) do
+  rcon.print("by_type." .. t .. "=" .. n)
+end
+`;
+    const output = await this.runTemplateLua("clear_obstacles.lua", body);
+    const parsed = parseKeyValueOutput(output);
+    if (!parsed.ok || parsed.ok === "false") {
+      throw new Error(`clear_obstacles failed: ${parsed.error || output}`);
+    }
+    const cleared = Number(parsed.cleared || 0);
+    const by_type = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (k.startsWith("by_type.")) by_type[k.slice("by_type.".length)] = Number(v);
+    }
+    return { cleared, by_type, output };
+  }
+
+  // Single-target teardown: destroy whatever entity sits on the given tile,
+  // optionally constrained by name. Used for explicit plan.preparation
+  // entries (Designer says "remove this old burner-drill"). Returned items
+  // are dropped (not transferred to worker) — keeping the action simple
+  // until a real "salvage" use case appears.
+  async deconstructAt(input) {
+    const pos = input?.position;
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) {
+      throw new Error("deconstruct_at: position {x, y} required");
+    }
+    const surface = String(input?.surface || "nauvis");
+    const entityFilter = input?.entity ? String(input.entity) : null;
+    const body = `
+local x = ${luaValue(pos.x)}
+local y = ${luaValue(pos.y)}
+local surface = game.surfaces[${luaValue(surface)}]
+if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
+
+local query = { position = { x, y } }
+${entityFilter ? `query.name = ${luaValue(entityFilter)}` : ""}
+local entities = surface.find_entities_filtered(query)
+local destroyed = 0
+local names = {}
+for _, e in ipairs(entities) do
+  if e.valid then
+    table.insert(names, e.name)
+    e.destroy()
+    destroyed = destroyed + 1
+  end
+end
+rcon.print("ok=true")
+rcon.print("destroyed=" .. destroyed)
+rcon.print("names=" .. table.concat(names, ","))
+`;
+    const output = await this.runTemplateLua("deconstruct_at.lua", body);
+    const parsed = parseKeyValueOutput(output);
+    if (!parsed.ok || parsed.ok === "false") {
+      throw new Error(`deconstruct_at failed: ${parsed.error || output}`);
+    }
+    const destroyed = Number(parsed.destroyed || 0);
+    const names = (parsed.names || "").split(",").filter(Boolean);
+    return { destroyed, names, output };
+  }
+
+  // Create the audit-harness force idempotently. Called at server boot.
+  async ensureHarnessForce() {
+    const body = `
+if not game.forces["audit-harness"] then
+  local f = game.create_force("audit-harness")
+  f.research_all_technologies()
+  f.set_cease_fire("player", true)
+  game.forces.player.set_cease_fire("audit-harness", true)
+  f.set_friend("player", true)
+  game.forces.player.set_friend("audit-harness", true)
+end
+rcon.print("ok=true")
+`;
+    await this.runTemplateLua("ensure_harness_force.lua", body, 10000);
+  }
+
+  // Place harness entities (chest + bulk-inserter) at every belt/inventory port.
+  async placeHarness(input) {
+    const placements = Array.isArray(input?.placements) ? input.placements : [];
+    if (placements.length === 0) return { placed: 0, manifest: [] };
+
+    const surface = String(input?.surface || "nauvis");
+    const body = `
+local placements = ${luaValue(placements)}
+local surface = game.surfaces[${luaValue(surface)}]
+if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
+
+local harness_force = game.forces["audit-harness"]
+if not harness_force then
+  rcon.print("ok=false"); rcon.print("error=harness_force_missing"); return
+end
+
+local directions = {
+  north = defines.direction.south,
+  south = defines.direction.north,
+  east = defines.direction.west,
+  west = defines.direction.east,
+}
+local side_offsets = {
+  north = {dx = 0, dy = -1},
+  south = {dx = 0, dy = 1},
+  east  = {dx = 1, dy = 0},
+  west  = {dx = -1, dy = 0},
+}
+
+-- rotation helper
+local function rotate_rel(dx, dy, dir_name)
+  if dir_name == "north" then return dx, dy end
+  if dir_name == "east" then return -dy, dx end
+  if dir_name == "south" then return -dx, -dy end
+  if dir_name == "west" then return dy, -dx end
+  return dx, dy
+end
+
+local manifest = {}
+local total = 0
+
+for _, p in ipairs(placements) do
+  local anchor_x = p.anchor.x
+  local anchor_y = p.anchor.y
+  local dir = p.direction or "north"
+  for _, port in ipairs(p.ports) do
+    local rdx, rdy = rotate_rel(port.rel_pos[1], port.rel_pos[2], dir)
+    local port_x = anchor_x + rdx
+    local port_y = anchor_y + rdy
+
+    local side_off = side_offsets[port.side]
+    local inserter_x = port_x + side_off.dx
+    local inserter_y = port_y + side_off.dy
+    local chest_x = port_x + side_off.dx * 2
+    local chest_y = port_y + side_off.dy * 2
+
+    -- inserter direction: output = toward chest (same as side), input = toward port (opposite of side)
+    local inserter_dir
+    if port.role == "output" then
+      inserter_dir = directions[port.side]
+    else
+      -- opposite: flip the side direction
+      local opposite = {north="south", south="north", east="west", west="east"}
+      inserter_dir = directions[opposite[port.side]]
+    end
+
+    local chest = surface.create_entity{
+      name = "wooden-chest",
+      position = {chest_x, chest_y},
+      force = harness_force,
+    }
+    local inserter = surface.create_entity{
+      name = "bulk-inserter",
+      position = {inserter_x, inserter_y},
+      direction = inserter_dir,
+      force = harness_force,
+    }
+
+    if chest and chest.valid and inserter and inserter.valid then
+      total = total + 1
+      table.insert(manifest, {
+        port = port.name,
+        role = port.role,
+        item = port.item,
+        chest_pos = {x = chest_x, y = chest_y},
+        inserter_pos = {x = inserter_x, y = inserter_y},
+      })
+    else
+      if chest and chest.valid then chest.destroy() end
+      if inserter and inserter.valid then inserter.destroy() end
+    end
+  end
+end
+
+rcon.print("ok=true")
+rcon.print("placed=" .. total)
+rcon.print("manifest=" .. game.table_to_json(manifest))
+`;
+    const output = await this.runTemplateLua("place_harness.lua", body);
+    const parsed = parseKeyValueOutput(output);
+    if (!parsed.ok || parsed.ok === "false") {
+      throw new Error(`place_harness failed: ${parsed.error || output}`);
+    }
+    const placed = Number(parsed.placed || 0);
+    let manifest = [];
+    try {
+      manifest = JSON.parse(parsed.manifest || "[]");
+    } catch {
+      manifest = [];
+    }
+    return { placed, manifest, output };
+  }
+
+  // Refill input chests, drain output chests. Idempotent.
+  async harnessTick(input) {
+    const manifest = Array.isArray(input?.manifest) ? input.manifest : [];
+    if (manifest.length === 0) return { ticked: 0 };
+
+    const body = `
+local manifest = ${luaValue(manifest)}
+for _, entry in ipairs(manifest) do
+  local pos = entry.chest_pos
+  local entities = game.surfaces[1].find_entities_filtered{
+    position = {pos.x, pos.y},
+    name = "wooden-chest",
+  }
+  for _, e in ipairs(entities) do
+    if e.valid and e.get_inventory(defines.inventory.chest) then
+      local inv = e.get_inventory(defines.inventory.chest)
+      if entry.role == "input" then
+        inv.insert{name = entry.item, count = 200}
+      else
+        inv.clear()
+      end
+    end
+  end
+end
+rcon.print("ok=true")
+rcon.print("ticked=" .. #manifest)
+`;
+    const output = await this.runTemplateLua("harness_tick.lua", body, 10000);
+    const parsed = parseKeyValueOutput(output);
+    const ticked = Number(parsed.ticked || 0);
+    return { ticked, output };
+  }
+
+  // Destroy all harness entities.
+  async harnessTeardown(input) {
+    const surface = String(input?.surface || "nauvis");
+    const body = `
+local surface = game.surfaces[${luaValue(surface)}]
+if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
+
+local entities = surface.find_entities_filtered{force = "audit-harness"}
+local destroyed = 0
+for _, e in ipairs(entities) do
+  if e.valid then
+    e.destroy()
+    destroyed = destroyed + 1
+  end
+end
+rcon.print("ok=true")
+rcon.print("destroyed=" .. destroyed)
+`;
+    const output = await this.runTemplateLua("harness_teardown.lua", body);
+    const parsed = parseKeyValueOutput(output);
+    if (!parsed.ok || parsed.ok === "false") {
+      throw new Error(`harness_teardown failed: ${parsed.error || output}`);
+    }
+    const destroyed = Number(parsed.destroyed || 0);
+    return { destroyed, output };
+  }
+
+  // Place accumulator(s) at electric output ports as infinite load.
+  async powerHarnessSetup(input) {
+    const placements = Array.isArray(input?.placements) ? input.placements : [];
+    if (placements.length === 0) return { placed: 0, manifest: [] };
+
+    const surface = String(input?.surface || "nauvis");
+    const body = `
+local placements = ${luaValue(placements)}
+local surface = game.surfaces[${luaValue(surface)}]
+if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
+
+local harness_force = game.forces["audit-harness"]
+if not harness_force then
+  rcon.print("ok=false"); rcon.print("error=harness_force_missing"); return
+end
+
+local directions = {
+  north = defines.direction.north,
+  south = defines.direction.south,
+  east = defines.direction.east,
+  west = defines.direction.west,
+}
+local side_offsets = {
+  north = {dx = 0, dy = -1},
+  south = {dx = 0, dy = 1},
+  east  = {dx = 1, dy = 0},
+  west  = {dx = -1, dy = 0},
+}
+
+local function rotate_rel(dx, dy, dir_name)
+  if dir_name == "north" then return dx, dy end
+  if dir_name == "east" then return -dy, dx end
+  if dir_name == "south" then return -dx, -dy end
+  if dir_name == "west" then return dy, -dx end
+  return dx, dy
+end
+
+local manifest = {}
+local total = 0
+
+for _, p in ipairs(placements) do
+  local anchor_x = p.anchor.x
+  local anchor_y = p.anchor.y
+  local dir = p.direction or "north"
+  for _, port in ipairs(p.ports) do
+    local rdx, rdy = rotate_rel(port.rel_pos[1], port.rel_pos[2], dir)
+    local port_x = anchor_x + rdx
+    local port_y = anchor_y + rdy
+
+    -- Place accumulator 1 tile outward from the port side, then a pole 1 more tile
+    local side_off = side_offsets[port.side]
+    local acc_x = port_x + side_off.dx * 2
+    local acc_y = port_y + side_off.dy * 2
+    local pole_x = port_x + side_off.dx
+    local pole_y = port_y + side_off.dy
+
+    local acc = surface.create_entity{
+      name = "accumulator",
+      position = {acc_x, acc_y},
+      force = harness_force,
+    }
+    local pole = surface.create_entity{
+      name = "small-electric-pole",
+      position = {pole_x, pole_y},
+      force = harness_force,
+    }
+
+    -- Bridge to the player-force network. Cross-force poles don't auto-
+    -- connect, so the harness accumulator would otherwise be on its own
+    -- network with no source. Find the nearest player-force pole within
+    -- small-pole wire reach (~7.5 tiles) and connect explicitly via the
+    -- Factorio 2.0 wire-connector API. Iterating get_wire_connectors()
+    -- and matching by id avoids depending on a specific defines value.
+    if pole and pole.valid then
+      local candidates = surface.find_entities_filtered{
+        type = "electric-pole",
+        position = {pole_x, pole_y},
+        radius = 7.5,
+        force = "player",
+      }
+      for _, other in ipairs(candidates) do
+        if other.valid then
+          local mine = pole.get_wire_connectors(true)
+          local theirs = other.get_wire_connectors(true)
+          for id, my_conn in pairs(mine) do
+            local their_conn = theirs[id]
+            if their_conn then
+              my_conn.connect_to(their_conn)
+            end
+          end
+          break
+        end
+      end
+    end
+
+    if acc and acc.valid and pole and pole.valid then
+      total = total + 1
+      table.insert(manifest, {
+        port = port.name,
+        accumulator_pos = {x = acc_x, y = acc_y},
+        pole_pos = {x = pole_x, y = pole_y},
+      })
+    else
+      if acc and acc.valid then acc.destroy() end
+      if pole and pole.valid then pole.destroy() end
+    end
+  end
+end
+
+rcon.print("ok=true")
+rcon.print("placed=" .. total)
+rcon.print("manifest=" .. game.table_to_json(manifest))
+`;
+    const output = await this.runTemplateLua("power_harness_setup.lua", body, 10000);
+    const parsed = parseKeyValueOutput(output);
+    if (!parsed.ok || parsed.ok === "false") {
+      throw new Error(`power_harness_setup failed: ${parsed.error || output}`);
+    }
+    const placed = Number(parsed.placed || 0);
+    let manifest = [];
+    try {
+      manifest = JSON.parse(parsed.manifest || "[]");
+    } catch {
+      manifest = [];
+    }
+    return { placed, manifest, output };
+  }
+
+  // Destroy all harness entities (includes power harness accumulator/poles).
+  // Reuses the same audit-harness force teardown — all entities on that force
+  // are destroyed, whether they came from item or power harness.
+  async powerHarnessTeardown(input) {
+    // Delegated to harnessTeardown which already destroys all audit-harness force entities.
+    return this.harnessTeardown(input);
+  }
+
   async proposeCapability(input) {
     const id = actionId();
     await ensureDir(this.proposalDir());
@@ -3592,6 +4050,20 @@ end
         return this.routeBelt(input);
       case "wait_ticks":
         return this.waitTicks(input);
+      case "clear_obstacles":
+        return this.clearObstacles(input);
+      case "deconstruct_at":
+        return this.deconstructAt(input);
+      case "place_harness":
+        return this.placeHarness(input);
+      case "harness_tick":
+        return this.harnessTick(input);
+      case "harness_teardown":
+        return this.harnessTeardown(input);
+      case "power_harness_setup":
+        return this.powerHarnessSetup(input);
+      case "power_harness_teardown":
+        return this.powerHarnessTeardown(input);
       case "save":
         return { save: await this.save() };
       case "propose_capability":
