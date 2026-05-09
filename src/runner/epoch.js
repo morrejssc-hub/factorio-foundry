@@ -488,6 +488,7 @@ async function writeRunMeta({
       dry_validate: r.dry_validate,
       execute: r.execute,
       audit: r.audit,
+      observe: r.observe ?? null,
       error: r.error,
     });
   }
