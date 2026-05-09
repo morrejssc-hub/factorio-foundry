@@ -448,6 +448,47 @@ For each id to author:
      `crafting` or `advanced-crafting`. For non-crafting recipes (oil,
      chemicals), use `oil-refinery` / `chemical-plant` instead — same
      `settings: { recipe: ... }` shape applies.
+
+     **Feeding the assembler.** A recipe + power is not enough — the
+     assembler ALSO needs ingredients arriving at its tile. Pick ONE of:
+
+     **(A) Self-contained module with `starter_items`:** include an
+     `iron-chest` adjacent to the assembler and a `burner-inserter`
+     between them, then declare `starter_items` in the module yaml so
+     the chest is pre-filled when placed. Cheap, works for short verify
+     windows, but runs out:
+     ```yaml
+     # in module yaml:
+     starter_items:
+       - { target: input_chest, item: iron-plate, count: 200 }
+     # in blueprint:
+     #   input_chest (iron-chest) at (-2, 0)
+     #   feed_inserter (burner-inserter, direction=east) at (-1, 0) — picks from chest, drops on assembler
+     ```
+     Use this when the upstream module's output port is `kind: inventory`
+     (a chest) and connecting it cleanly is awkward — but be honest
+     about the running-out problem.
+
+     **(B) Cross-module `connections` in plan.yaml:** declare your
+     module's input port as `kind: belt` (or `kind: inventory` for chest
+     pickup), then route from an upstream module's output port via
+     `plan.yaml: connections:`. The runner places transport-belts /
+     inserters along the routed path:
+     ```yaml
+     # in plan.yaml:
+     connections:
+       - from: { module_id: e2-first-iron:p0, port: iron_plate_chest }
+         to:   { module_id: <this-placement-id>,  port: iron_plate_in }
+     ```
+     Read existing `lib/modules/*.yaml` to see which deployed modules
+     expose what output ports. Belt-to-belt or chest-to-belt-with-inserter
+     are the supported shapes.
+
+     **Common failure mode** — a module that declares an input port but
+     has no `starter_items` AND no `connections` entry feeding it will
+     audit as `measured: 0` (entity has recipe and power but no input).
+     This is silent — verify won't tell you "no input"; you'll just see
+     zero throughput.
    - `small-electric-pole` is 1x1, supplies power within a 7.5-tile
      radius and connects to other poles within 5.5 tiles via wires.
      Place one within range of every electric entity you author AND
