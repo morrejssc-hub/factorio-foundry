@@ -2,20 +2,6 @@
 
 This is the single forward-looking doc. Everything here is intentionally deferred; promote items to a real plan when ready to act.
 
-## verify uses snapshot/rollback
-
-**What.** Replace verify's "dirty fork → reload input save → re-execute" pattern with `controller.snapshot("pre-harness")` after placement, run harness + meter, then `controller.rollback("pre-harness")` and `controller.exportZip(savePathOut)`. Eliminates the second `runExecute` call, the harness-teardown obligation, and 2x placement on the winner path.
-
-**Why deferred.** Foundation landed (controller + `snapshot()/rollback()/exportZip()` methods + unit tests). Wiring it into verify is one localised edit but flips the save-lifecycle shape and needs an e1+e2+e3 smoke baseline. Worth its own focused PR.
-
-**What unblocks.** Pick a quiet day, read the current verify.js step structure (steps 1–9), insert snapshot before step 5 (place harness) and rollback after step 8 (verdict). Then delete the `runExecute` call from `epoch.js#runCompositionEpoch` (line ~239) and `runOneExecuteAudit` (line ~660). Update the file headers that still describe the old shape.
-
-## verify / observe meter dedup
-
-**What.** Push the shared meter-window orchestration (before-snapshot, advanceTicks loop, after-snapshot, criteria evaluation, verdict assembly) into a `meter.js` helper that takes a controller. verify calls it with `{harnessTicker: true}`; observe calls it with `{harnessTicker: false}`. Removes ~80 lines of remaining duplication.
-
-**Why deferred.** Mostly cosmetic; both phases work today. Cleaner after the snapshot/rollback flip above lands, since the verify body shrinks.
-
 ## Sequential vs parallel feedback parity
 
 **What.** `runCompositionEpoch` (sequential) accumulates `previousAttempts` so every retry's design call sees prior failures (root_cause, suggested_changes from `executor_proposal.json`) and gets up to 3 free dry-validate retries per attempt. `runParallelCompositionEpoch` (parallel) does neither — each candidate's design starts with `previousAttempts: []` and dry-validate failures consume a candidate slot.

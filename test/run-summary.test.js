@@ -178,7 +178,15 @@ test("scanRunDir falls back when run-meta.json absent (multi-attempt layout)", a
       await mkdir(join(dir, "execute"), { recursive: true });
       await writeJson(join(dir, "observe.json"), { pass: n === 3, measured: n === 3 ? 0.99 : 0.25, threshold: 0.95, item: "coal", seconds_actual: 60, produced_delta: 30 });
       await writeJson(join(dir, "dry-validate.json"), { ok: true, errors: [] });
-      await writeJson(join(dir, "execute", "execute.json"), { ok: true });
+      await writeJson(join(dir, "execute", "verify.json"), {
+        pass: n === 3,
+        measured: n === 3 ? 0.99 : 0.25,
+        threshold: 0.95,
+        item: "coal",
+        seconds_actual: 60,
+        produced_delta: 30,
+        savePath: n === 3 ? `state/saves/x-c${n}.zip` : null,
+      });
       await writePlanYaml(join(dir, "design"), n === 3 ? 4 : 1);
       await writePiTrace(join(dir, "design"), { wall_ms: 4000, tokens: 8000, cost: 0.04, previous_attempts: n - 1 });
     }

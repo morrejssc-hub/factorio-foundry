@@ -10,12 +10,12 @@ Three rules carried over from earlier iterations:
 
 1. **Tool intermediation.** No raw RCON / Lua to the LLM. Every probe goes through a typed Factorio service action.
 2. **Bundle separation.** `lib/` is read-only to Designer. New modules are authored under `staged-modules/` and promoted to `lib/` only after the verify phase passes.
-3. **Deterministic observe.** The `observe` phase (post-execute clean-save measurement) MUST NOT invoke `pi`. Determinism is what makes multi-candidate comparisons valid.
+3. **Deterministic observe.** The `observe` phase (post-verify clean-save measurement) MUST NOT invoke `pi`. Determinism is what makes multi-candidate comparisons valid.
 
 ## The pipeline
 
 ```
-probe → design → dry-validate → verify → execute → observe
+probe → design → dry-validate → verify → observe
 ```
 
 `bootstrap` epochs (`kind: bootstrap`) skip everything except inventory stocking and a clean save.
@@ -36,39 +36,33 @@ Schema retry: if the LLM returns malformed `plan.yaml`, the design phase re-prom
 
 Pure JS + an optional Factorio probe. Checks placement schema, footprint overlap, port-contract sanity, then (if a controller is attached) runs `lib/probes/validate-placement.lua` to confirm tile-level can_place against the live world.
 
-`recovery_attempts` budget is reserved for the expensive verify/execute failures. dry-validate failures are spatial mistakes the LLM can fix from prompt feedback alone, so they get up to **3 free re-designs** (sequential path only — parallel mode dry-validates each candidate once).
+`recovery_attempts` budget is reserved for the expensive verify failures. dry-validate failures are spatial mistakes the LLM can fix from prompt feedback alone, so they get up to **3 free re-designs** (sequential path only — parallel mode dry-validates each candidate once).
 
 Output: `dry-validate.json` under each candidate dir.
 
 ### verify (`src/runner/verify.js`)
 
-Phase that gates pass/fail. On the input save:
+Phase that gates pass/fail AND produces the winner save. On the input save:
 
 1. Run `dry-validate` (static portion).
 2. Run `runPreparation` (`plan.preparation` deconstruct ops, if any).
-3. Place modules via `placeOne` (re-uses `execute.js` helpers).
+3. Place modules via `placeOne` (re-uses helpers from `execute.js`).
 4. Route inter-module connections (`routeConnections`).
-5. Place the **harness** on the `audit-harness` Factorio force (chest + bulk-inserter at every belt/inventory port; accumulator + pole at every power port).
-6. Run the meter window: `controller.advanceTicks(chunk)` in 600-tick (10s game-time) chunks; harness ticker fires after each chunk to refill input chests / drain output chests.
-7. Run the meter script before + after, compute `measured = produced / seconds`.
+5. **`controller.snapshot("pre-harness")`** — snapshot the clean post-placement world. This IS the winner save.
+6. Place the **harness** on the `audit-harness` Factorio force (chest + bulk-inserter at every belt/inventory port; accumulator + pole at every power port).
+7. Run the meter window via `meter.js#runMeterWindow`: chunked `controller.advanceTicks(600)` ticks (10s game-time per chunk) with a `harness_tick` callback fired after each chunk to refill input chests / drain output chests. The meter script runs before + after; `measured = produced / seconds`.
 8. Evaluate `epoch.success_criteria` against the verdict.
-9. Tear down the harness (`harness_teardown` action — destroys all `audit-harness`-force entities).
+9. **On pass:** `controller.rollback("pre-harness")` rewinds to step 5's clean state, then `controller.exportZip(savePathOut)` writes the candidate zip.
 
-Output: `verify.json` under `<candidate>/execute/`.
+Output: `verify.json` under `<candidate>/execute/` (with `savePath` populated when pass) + the candidate `.zip` save.
 
-The harness lives on a separate Factorio force so its inserter activity does not pollute `force.get_item_production_statistics(player)` reads done by meters.
+The harness lives on a separate Factorio force so its inserter activity does not pollute `force.get_item_production_statistics(player)` reads done by meters. Teardown is implicit — the rollback discards the harness.
 
-### execute (`src/runner/execute.js`)
-
-When verify passes, the runner reloads the **input save** (clean world, no harness mutations) and re-applies `runPreparation` + `placeOne` + `routeConnections`. The result is `controller.exportZip(savePathOut)` — the candidate save zip that may be promoted to winner.
-
-`pi` fallback: if a deterministic placement fails (e.g., missing item, blocked tile that auto-clear can't resolve), `repairWithPi` spawns a one-shot `pi` agent with `factorio_action` access and a focused repair prompt. Bounded: one chance per failed placement.
-
-`buildPlacementProposal` / `buildConnectionProposal` write a structured `proposal.json` on failure — the next design retry sees `{root_cause, suggested_changes, failed_step}` instead of just an error string.
+`buildPlacementProposal` / `buildConnectionProposal` (from `src/runner/executor-proposal.js`) write a structured `proposal.json` on placement / connection failure — the next design retry sees `{root_cause, suggested_changes, failed_step}` instead of just an error string.
 
 ### observe (`src/runner/observe.js`)
 
-Same meter window logic as verify, no harness. Runs on the in-memory post-execute world (which was just saved to the candidate zip). `observe.json` is the observational record: "what does this design actually produce in production?". Never gates pass/fail; never invokes `pi`.
+Same `runMeterWindow` helper as verify, called without the harness ticker. Runs on the in-memory post-verify world (the rolled-back clean-save state). `observe.json` is the observational record: "what does this design actually produce in production?". Never gates pass/fail; never invokes `pi`.
 
 Output: `observe.json` under `<candidate>/`.
 
@@ -84,7 +78,7 @@ Surface:
 - **Reads** — `read(actionName, params)` → POSTs `${serviceUrl}/tool/factorio_read`
 - **Time control** — `advanceTicks(n)` → POSTs `wait_ticks` action
 - **Entity counts** — `countEntities()`, `countEntitiesByName({name, surface})`
-- **Snapshot / rollback** — `snapshot(name)` (RCON `/server-save`, copy zip into `<savesDir>/snapshots/<name>.zip`), `rollback(name)` (stop + swap + start, ~10s), `exportZip(destination)`. Currently no caller; foundation for the verify-uses-snapshot follow-up.
+- **Snapshot / rollback** — `snapshot(name)` (RCON `/server-save`, copy zip into `<savesDir>/snapshots/<name>.zip`), `rollback(name)` (stop + swap + start, ~10s), `exportZip(destination)`. Used by verify: snapshot before harness placement, rollback + exportZip on pass.
 
 `InstancePool` (`src/runner/instance-pool.js`) — N-slot pool for parallel candidates. Each slot owns its own `FactorioServer` + HTTP api + RCON ports + save dir + `FactorioController`. `pool.acquire()` / `pool.release()`.
 
@@ -95,9 +89,9 @@ For a composition epoch with `recovery_attempts: N`:
 1. `runEpoch` builds a controller from the parent `FactorioServer`.
 2. Sequential: one attempt loop with up to 3 free dry-validate re-designs per attempt; world reset to input save between attempts.
 3. Parallel: `n = config.parallelCandidates` independent designs run concurrently; each gets a slot from `InstancePool`; one winner is picked by `pickWinner`.
-4. Verify-pass winner: reload input save, run execute, save zip → `state/saves/<epoch>/<runTs>-c<idx>.zip`, run observe.
+4. Verify-pass winner: verify rolled back to its pre-harness snapshot and exported the candidate zip → `state/saves/<epoch>/<runTs>-c<idx>.zip`. Observe runs on the rolled-back world.
 5. Promote winner: copy candidate zip to `state/saves/<epoch>/winner.zip`, append placements to `state/world.md` `## Deployed modules` fence, write `state/digests/<epoch>.md`.
-6. `<runDir>/run-meta.json` rolls up probe + design + verify + execute + observe blocks per attempt.
+6. `<runDir>/run-meta.json` rolls up probe + design + verify + observe blocks per attempt.
 7. `<runDir>/summary.md` is auto-rendered by `run-summary.js` from `run-meta.json`.
 
 ## Save lifecycle
@@ -105,18 +99,20 @@ For a composition epoch with `recovery_attempts: N`:
 ```
 input_save.zip                       # never mutated
   ↓ controller.loadSave
-in-memory factorio world             # mutated by verify (with harness)
-  ↓ verify-pass: controller.loadSave(input_save) again, re-execute on clean world
-in-memory factorio world             # post-execute, no harness
+in-memory factorio world             # mutated by verify (placements + connections)
+  ↓ controller.snapshot("pre-harness")
+<savesDir>/snapshots/pre-harness.zip # clean post-placement state
+  ↓ verify places harness, runs meter window
+in-memory factorio world             # dirty (with harness)
+  ↓ verify-pass: controller.rollback("pre-harness")
+in-memory factorio world             # clean again
   ↓ controller.exportZip
-state/saves/<epoch>/<runTs>-cN.zip   # candidate save
+state/saves/<epoch>/<runTs>-cN.zip   # candidate save (also seeded into verify.json#savePath)
   ↓ promoteWinner (if winner)
 state/saves/<epoch>/winner.zip       # input for downstream epochs
 ```
 
-The "verify dirties the world, execute re-runs on clean save" pattern is the current shape. The verify phase's harness never touches the promoted save.
-
-A planned change (see `todo.md`) flips verify to use `controller.snapshot()` + `controller.rollback()` instead, eliminating the second `runExecute` and the harness-teardown obligation.
+The harness-bearing world is discarded by the rollback; nothing harness-related ever reaches the promoted save. On verify-fail, the dirty world is wiped by `controller.loadSave(inputSave)` at the top of the next recovery attempt.
 
 ## lib/ layout
 
@@ -162,7 +158,7 @@ Resolution lives in `src/runner/meter-resolver.js`. The criteria-evaluation laye
 
 ## Sequential vs parallel
 
-Sequential (`runCompositionEpoch`): one attempt at a time, up to `recovery_attempts` retries. Free dry-validate retries via inner loop. `previousAttempts` accumulates verify/execute failures so the next design call sees a focused brief on what failed.
+Sequential (`runCompositionEpoch`): one attempt at a time, up to `recovery_attempts` retries. Free dry-validate retries via inner loop. `previousAttempts` accumulates verify failures so the next design call sees a focused brief on what failed.
 
 Parallel (`runParallelCompositionEpoch`, when `config.parallelCandidates > 1`): N independent designs run concurrently on N slots from `InstancePool`. No cross-candidate feedback (each design starts with `previousAttempts: []`). Winner picked by `pickWinner` after all candidates finish.
 

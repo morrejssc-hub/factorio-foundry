@@ -1,18 +1,14 @@
-// execute.js — Execute phase. Walks plan.placements and POSTs
-// execute_blueprint to the Factorio service for each one. After all
-// placements, calls save and copies the resulting zip into
-// state/saves/<epoch>-v<N>.zip.
+// execute.js — placement primitives shared by verify.js.
 //
-// pi fallback: if a deterministic placement fails, we spawn a one-shot pi
-// with factorio_read + factorio_action tools and a focused repair prompt
-// giving it the failed step's context. The fallback is bounded — it gets
-// one chance per failed step, then the run is failed.
-import { mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { piInvoke } from "../pi-invoke.js";
-import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
+// After the snapshot/rollback flip in verify, the runner no longer needs
+// a separate execute pass to produce the winner save (verify owns the
+// whole pipeline now). What remains here is the lower-level vocabulary
+// that verify composes: place a single blueprint, run plan.preparation
+// teardowns, route belt connections between placements, plus the small
+// geometry helpers used by both verify and meter-resolver.
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { DIRECTION_NAMES } from "../geometry/schema.js";
-import { buildPlacementProposal, buildConnectionProposal } from "./executor-proposal.js";
 import { findPort } from "../lib-loader.js";
 
 async function executeBlueprint({ controller, blueprint, anchor, direction, dryRun }) {
@@ -121,76 +117,6 @@ export async function runPreparation({ controller, plan, log }) {
     }
   }
   return results;
-}
-
-async function repairWithPi({ controller, epoch, plan, placement, error, outDir, log, stateYamlPath }) {
-  const config = controller.config;
-  const repairDir = join(outDir, "repair", placement.id);
-  await mkdir(repairDir, { recursive: true });
-  await writeFile(join(repairDir, "plan.yaml"), JSON.stringify(plan, null, 2), "utf8");
-  await writeFile(join(repairDir, "failed.json"), JSON.stringify({
-    placement,
-    error: error.message,
-    payload: error.payload,
-  }, null, 2), "utf8");
-  // Surface state.yaml inside the repair cwd so the agent can grep
-  // world_inventory without escaping upward through symlinks.
-  if (stateYamlPath) {
-    try { await copyFile(stateYamlPath, join(repairDir, "state.yaml")); } catch {}
-  }
-  const factorioServerExt = resolve(config.rootDir, ".pi/extensions/factorio-server/index.ts");
-  const message = [
-    `A deterministic blueprint placement failed.`,
-    `See failed.json for placement and error details.`,
-    ``,
-    `Use factorio_read and factorio_action to recover, then re-place the`,
-    `blueprint via execute_blueprint with the SAME anchor and direction.`,
-    `Save no extra entities. Budget: 30 calls.`,
-    ``,
-    `Common failure modes — playbook in priority order:`,
-    ``,
-    `1. MISSING ITEM IN WORKER INVENTORY (precondition_failed with`,
-    `   missingItems). Resolve in this order, not bottom-up:`,
-    `   a. factorio_read inspect_inventory the chests already deployed in`,
-    `      the world — every entry in state.yaml's world_inventory section`,
-    `      maps to a chest. If a chest holds the missing item,`,
-    `      factorio_action transfer_inventory it into the worker.`,
-    `   b. If no chest has it, factorio_read craft_catalog to see what`,
-    `      hand-craft can produce; if the missing item is listed and you`,
-    `      hold the ingredients (or can craft them transitively), call`,
-    `      factorio_action craft. craft_catalog is authoritative — the`,
-    `      in-game recipe set is a superset and the craft action will`,
-    `      reject anything not in the catalog.`,
-    `   c. Only if (a) and (b) both fail: factorio_action mine_resource`,
-    `      or place a new mining setup yourself.`,
-    ``,
-    `2. BLOCKED TILE / wrong anchor: factorio_read inspect_position to`,
-    `   see what's there; mine_entity_to_inventory if a stray entity is`,
-    `   blocking; or accept that the anchor is wrong and report failure`,
-    `   (do not silently move to a different anchor).`,
-    ``,
-    `3. After resolving the cause, call execute_blueprint with the`,
-    `   original anchor + direction. If it still fails, exit with the`,
-    `   error rather than improvising further.`,
-  ].join("\n");
-  log(`[execute][repair] invoking pi for ${placement.id}…`);
-  const result = await piInvoke({
-    prompt: message,
-    tools: ["read", "factorio_read", "factorio_action"],
-    extensions: [factorioServerExt],
-    cwd: repairDir,
-    serviceUrl: config.serviceUrl,
-    timeoutMs: 600_000,
-    onStdout: (line) => log(`[repair pi] ${line}`),
-    onStderr: (line) => process.stderr.write(`[repair pi err] ${line}\n`),
-  });
-  // Persist the repair trace alongside failed.json so cost/timing of the
-  // repair pi call is preserved on disk. Not yet rolled up into run-meta;
-  // operators can sum repairDir/*/pi-trace.json manually for now.
-  const trace = newTrace("execute_repair", { placement_id: placement.id });
-  addPiCall(trace, result);
-  await writePiTrace(repairDir, trace);
-  return result;
 }
 
 // Rotate a canonical (north-orientation) rel_pos by the placement direction.
@@ -360,83 +286,4 @@ export async function routeConnections({ controller, plan, modules, log }) {
   }
 
   return connections;
-}
-
-/**
- * @param {object} args
- * @param {object} args.controller
- * @param {object} args.epoch
- * @param {object} args.plan
- * @param {Map<string, object>} args.modules
- * @param {string} args.outDir       — plans/<run>/execute/
- * @param {string} args.savePathOut  — destination for the produced save zip
- * @returns {Promise<{savePath: string, perPlacement: object[]}>}
- */
-export async function runExecute({ controller, epoch, plan, modules, outDir, savePathOut, stateYamlPath }) {
-  await mkdir(outDir, { recursive: true });
-  const log = (msg) => {
-    console.log(msg);
-  };
-  let preparationResults = [];
-  try {
-    preparationResults = await runPreparation({ controller, plan, log });
-  } catch (prepError) {
-    await writeFile(join(outDir, "execute.json"), JSON.stringify({
-      ok: false, preparation: preparationResults, perPlacement: [],
-      error: prepError.message,
-    }, null, 2), "utf8");
-    throw prepError;
-  }
-  const perPlacement = [];
-  for (const placement of plan.placements) {
-    try {
-      const r = await placeOne({ controller, placement, modules, log });
-      perPlacement.push({ placement: placement.id, ok: true, dry: r.dry, live: r.live });
-    } catch (error) {
-      log(`[execute] placement ${placement.id} failed: ${error.message}`);
-      try {
-        await repairWithPi({ controller, epoch, plan, placement, error, outDir, log, stateYamlPath });
-        perPlacement.push({ placement: placement.id, ok: true, repaired: true });
-      } catch (repairError) {
-        perPlacement.push({ placement: placement.id, ok: false, error: error.message, repairError: repairError.message });
-        await writeFile(join(outDir, "execute.json"), JSON.stringify({ ok: false, perPlacement }, null, 2), "utf8");
-        // Structured proposal for design retry feedback. Placement here is
-        // the one that failed; classifyRootCause inspects the error message
-        // to bucket common failure shapes (collision / missing resource /
-        // blueprint geometry / etc.) into a small enum the LLM can reason
-        // about. The raw error is preserved in extra.raw_error.
-        const failedStep = plan.placements.findIndex((p) => p.id === placement.id);
-        const proposal = buildPlacementProposal(failedStep, placement, error);
-        await writeFile(join(outDir, "proposal.json"), JSON.stringify(proposal, null, 2), "utf8");
-        throw new Error(`execute failed at placement ${placement.id}: ${error.message}`);
-      }
-    }
-  }
-
-  let connectionResults;
-  try {
-    connectionResults = await routeConnections({ controller, plan, modules, log });
-  } catch (connError) {
-    // routeConnections throws "connection <from>→<to> failed: <reason>".
-    // Parse the from/to back out so the proposal can name the offending pair.
-    const match = (connError.message || "").match(/^connection (\S+)→(\S+) failed: /);
-    const conn = match
-      ? (plan.connections || []).find((c) => c.from === match[1] && c.to === match[2])
-      : null;
-    const proposal = buildConnectionProposal(conn ?? (match ? { from: match[1], to: match[2] } : null), connError);
-    await writeFile(join(outDir, "proposal.json"), JSON.stringify(proposal, null, 2), "utf8");
-    await writeFile(join(outDir, "execute.json"), JSON.stringify({ ok: false, perPlacement, connections: [], save: null }, null, 2), "utf8");
-    throw connError;
-  }
-
-  log(`[execute] saving game…`);
-  await controller.exportZip(savePathOut);
-  await writeFile(join(outDir, "execute.json"), JSON.stringify({
-    ok: true,
-    preparation: preparationResults,
-    perPlacement,
-    connections: connectionResults,
-    save: savePathOut,
-  }, null, 2), "utf8");
-  return { savePath: savePathOut, perPlacement, preparation: preparationResults };
 }

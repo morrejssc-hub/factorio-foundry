@@ -88,14 +88,13 @@ async function scanRunDir(runDir) {
 }
 
 async function scanAttempt(attemptDir, attemptNum, totals) {
-  // observe.json is written by observe.js on the clean post-execute world.
-  // When run-meta.json is missing we synthesize the meta from what's on disk;
-  // observe.json is the only verdict file present, so populate the `observe`
-  // block. The `verify` block (which would come from verify.json under
-  // execute/) is left null in this fallback path.
+  // When run-meta.json is missing we synthesize the meta from what's on disk.
+  // verify.json (under execute/) carries pass/measured/threshold + savePath
+  // since the snapshot/rollback flip; observe.json on the clean post-execute
+  // world adds the no-harness comparison number.
   const observe = await readJsonOrNull(join(attemptDir, "observe.json"));
   const dry = await readJsonOrNull(join(attemptDir, "dry-validate.json"));
-  const exec = await readJsonOrNull(join(attemptDir, "execute", "execute.json"));
+  const verify = await readJsonOrNull(join(attemptDir, "execute", "verify.json"));
   const designTrace = await readJsonOrNull(join(attemptDir, "design", "pi-trace.json"));
   const plan = await readYamlOrNull(join(attemptDir, "design", "plan.yaml"));
   const wall = designTrace?.wall_ms ?? 0;
@@ -118,8 +117,15 @@ async function scanAttempt(attemptDir, attemptNum, totals) {
       previous_attempts: designTrace?.previous_attempts ?? 0,
     },
     dry_validate: dry ? { ok: dry.ok, errors: dry.errors ?? [] } : null,
-    execute: exec ? { ok: exec.ok, save_path: null } : null,
-    verify: null,
+    execute: verify ? { ok: verify.pass, save_path: verify.savePath ?? null } : null,
+    verify: verify ? {
+      pass: verify.pass,
+      measured: verify.measured,
+      threshold: verify.threshold,
+      item: verify.item,
+      seconds_actual: verify.seconds_actual,
+      produced_delta: verify.produced_delta,
+    } : null,
     observe: observe ? {
       pass: observe.pass,
       measured: observe.measured,

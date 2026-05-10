@@ -4,10 +4,10 @@ A Factorio agent built on a deliberate inversion: **the LLM writes code (module 
 
 ## Pipeline
 
-Every composition epoch runs six phases in order:
+Every composition epoch runs five phases in order:
 
 ```
-probe → design → dry-validate → verify → execute → observe
+probe → design → dry-validate → verify → observe
 ```
 
 | Phase | Owner | Writes | Purpose |
@@ -15,8 +15,7 @@ probe → design → dry-validate → verify → execute → observe
 | `probe` | LLM via `pi` | `state.yaml` | Snapshot persistent world (resource patches, worker, world inventory) |
 | `design` | LLM via `pi` | `plan.yaml` (+ optional staged module files) | Pick modules + anchors + connections |
 | `dry-validate` | JS (deterministic) | `dry-validate.json` | Schema + footprint + tile-canPlace checks |
-| `verify` | JS + Factorio harness | `verify.json` (in `<candidate>/execute/`) | Place modules + harness, run meter window, gate pass/fail |
-| `execute` | JS (+ pi fallback) | candidate `.zip` save | Re-place on a clean world (no harness), produce promotable save |
+| `verify` | JS + Factorio harness | `verify.json` (in `<candidate>/execute/`) + candidate `.zip` save | Place modules, snapshot, place harness, run meter window, gate pass/fail. On pass: rollback to the pre-harness snapshot and export the clean winner zip. |
 | `observe` | JS + Factorio (clean save) | `observe.json` (in `<candidate>/`) | Measure same workload without harness — observational, not gating |
 
 Bootstrap epochs (`kind: bootstrap`) skip everything except inventory stocking and a clean save.
@@ -35,6 +34,7 @@ src/
     factorio-controller.js   # composes FactorioServer; one facade for all phases
     epoch.js                 # orchestrator (sequential + parallel paths)
     probe.js, design.js, dry-validate.js, verify.js, execute.js, observe.js
+    meter.js                 # shared meter-window orchestration (verify + observe)
     meter-resolver.js        # picks which lua meter to run for an epoch
     success-criteria.js      # criteria evaluation (threshold/nonzero/build_only/entity_exists)
     instance-pool.js         # N-slot pool for parallel candidates
@@ -79,7 +79,7 @@ npm run check       # static config / config.js sanity
 ## Conventions
 
 - Phases never reach into `config.rconHost`, `factorio.handleAction`, `rconExec`, `fetch(serviceUrl)` directly. They take a `FactorioController` and call `controller.action / .rcon / .runLuaScript / .read / .advanceTicks / .loadSave / .snapshot / .rollback / .exportZip`.
-- The `observe` phase (deterministic verdict, post-execute) MUST NOT invoke `pi`. Phase determinism gates the parallel-candidate comparison.
+- The `observe` phase (deterministic verdict, post-verify on the clean save) MUST NOT invoke `pi`. Phase determinism gates the parallel-candidate comparison.
 - New modules go in `staged-modules/` during design, get promoted to `lib/modules/` + `lib/blueprints/` only after the verify phase passes.
 - `world.md`'s yaml fence (`## Deployed modules`) is machine-managed; surrounding prose is agent-managed.
 

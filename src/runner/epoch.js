@@ -4,7 +4,7 @@
 //   - bootstrap: deterministic. Creates a fresh save, ensures worker, stocks
 //     starter inventory. No probe / design / verify / observe phases.
 //   - composition: full pipeline (probe → design → dry-validate → verify →
-//     execute → observe). Operates on an input save, produces an output save.
+//     observe). Operates on an input save, produces an output save.
 import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -13,7 +13,6 @@ import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
 import { runVerify } from "./verify.js";
-import { runExecute } from "./execute.js";
 import { runObserve } from "./observe.js";
 import { InstancePool } from "./instance-pool.js";
 import { FactorioController } from "./factorio-controller.js";
@@ -28,7 +27,7 @@ import { worldMdPath, appendDeployedModule } from "./world-md.js";
 // dry-validate failures are spatial/recipe/inventory mistakes that the LLM
 // can fix from prompt feedback alone — no Factorio simulation needed. They
 // get up to N free re-designs without consuming the recovery_attempts
-// budget (which is reserved for the expensive verify/execute failures).
+// budget (which is reserved for the expensive verify failures).
 const MAX_DRY_VALIDATE_RETRIES = 3;
 
 export async function loadEpoch(epochsDir, epochId) {
@@ -123,7 +122,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   });
   log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
-  // Recovery loop: design → dry-validate → verify → execute → observe, with the
+  // Recovery loop: design → dry-validate → verify → observe, with the
   // world reset to input_save before each retry so each attempt starts
   // from the same blank slate. previousAttempts is fed to design so the
   // next LLM call sees a focused brief on what already failed.
@@ -159,7 +158,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       // spatial/recipe/inventory mistakes (cheap to detect, no Factorio
       // simulation cost). They get up to MAX_DRY_VALIDATE_RETRIES free
       // re-designs WITHOUT consuming the attempt budget — recovery_attempts
-      // is reserved for verify/execute failures (which DO carry the 60s+
+      // is reserved for verify failures (which DO carry the 60s+
       // simulation cost). Each retry pushes the failure to previousAttempts
       // so the next runDesign sees the dry-validate error and can adjust.
       let dryValidateRetry = 0;
@@ -228,26 +227,18 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         plan: designResult.plan,
         modules,
         outDir: executeOut,
-        stateYamlPath: probeResult.stateYamlPath,
+        savePathOut: candidateSavePath,
       });
       verdict = verifyResult.verdict;
       log(`[epoch ${epoch.id}] attempt ${attempt}: verify ok — pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
       lastVerdict = verdict;
 
       if (verdict.pass) {
-        // Reload clean world from input save for final execute (no harness)
-        log(`[epoch ${epoch.id}] attempt ${attempt}: execute (clean save)`);
-        await controller.loadSave(inputSave);
-        exResult = await runExecute({
-          controller,
-          epoch,
-          plan: designResult.plan,
-          modules,
-          outDir: executeOut,
-          savePathOut: candidateSavePath,
-          stateYamlPath: probeResult.stateYamlPath,
-        });
-        log(`[epoch ${epoch.id}] attempt ${attempt}: execute ok — save=${exResult.savePath}`);
+        // Verify already exported the winner save via snapshot+rollback;
+        // no separate execute pass needed. Mirror the old exResult shape
+        // so attemptRecords / promoteWinner consumers stay unchanged.
+        exResult = { savePath: verifyResult.savePath, perPlacement: verifyResult.perPlacement };
+        log(`[epoch ${epoch.id}] attempt ${attempt}: save exported — ${exResult.savePath}`);
 
         // Observe: measure the clean save without harness (same meter as verify)
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
@@ -643,7 +634,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
       plan: designResult.plan,
       modules,
       outDir: executeOut,
-      stateYamlPath: probeResult?.stateYamlPath,
+      savePathOut: candidateSavePath,
     });
     const verdict = verifyResult.verdict;
     record.verify = {
@@ -659,20 +650,10 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
     log(`[epoch ${epoch.id}] [${cid}] verify ok — pass=${verdict.pass} measured=${verdict.measured}`);
 
     if (verdict.pass) {
-      // Reload clean world from input save for final execute (no harness)
-      await slot.controller.loadSave(inputSave);
-      log(`[epoch ${epoch.id}] [${cid}] execute (clean save, slot ${slot.index})`);
-      const exResult = await runExecute({
-        controller: slot.controller,
-        epoch,
-        plan: designResult.plan,
-        modules,
-        outDir: executeOut,
-        savePathOut: candidateSavePath,
-        stateYamlPath: probeResult?.stateYamlPath,
-      });
-      record.execute = { ok: true, save_path: exResult.savePath };
-      log(`[epoch ${epoch.id}] [${cid}] execute ok — save=${exResult.savePath}`);
+      // Verify already exported the winner save via snapshot+rollback;
+      // no separate execute pass needed.
+      record.execute = { ok: true, save_path: verifyResult.savePath };
+      log(`[epoch ${epoch.id}] [${cid}] save exported — ${verifyResult.savePath}`);
 
       // Observe: measure the clean save without harness
       log(`[epoch ${epoch.id}] [${cid}] observe`);
@@ -697,7 +678,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
     }
   } catch (err) {
     record.error = err.message;
-    log(`[epoch ${epoch.id}] [${cid}] verify/execute failed: ${err.message}`);
+    log(`[epoch ${epoch.id}] [${cid}] verify failed: ${err.message}`);
   } finally {
     pool.release(slot);
   }

@@ -1,43 +1,32 @@
-// verify.js — Unified verify phase. Orchestrates static validation, module
-// placement, harness placement, meter window with ticker, criteria
-// evaluation, harness teardown, and save-on-pass.
+// verify.js — Unified verify phase. Owns the entire pipeline from static
+// validation through winner save export:
 //
-// NOTE: the "verify replaces execute" framing in this header reflects the
-// long-term intent (see verify-plan.md). Today verify still runs alongside a
-// separate runExecute call in epoch.js — verify dirties a fork with harness,
-// then epoch.js reloads input save and re-runs runExecute on the clean save.
-// See docs/drifting-tinkering-crayon.md for the planned snapshot/rollback
-// migration that will make the header literally true.
+//   1. dry-validate
+//   2. place modules (with auto-clear retry; proposal.json on failure)
+//   3. routeConnections                       (proposal.json on failure)
+//   4. snapshot("pre-harness")                ← clean post-execute state
+//   5. place item harness + power harness
+//   6. meter window via runMeterWindow (drives harness_tick every 600 ticks)
+//   7. on pass: rollback("pre-harness") → exportZip(savePathOut)
+//
+// The snapshot+rollback flip removed the old "verify dirties a fork →
+// epoch.js reloads input save → runExecute re-places everything" dance.
+// The clean snapshot taken at step 4 IS the winner save (pre-harness, all
+// placements + connections in place); we just rewind to it after the meter
+// window and dump it to disk. No second placement pass, no harness teardown.
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   placeOne,
   runPreparation,
   routeConnections,
 } from "./execute.js";
 import { runDryValidate } from "./dry-validate.js";
-import { resolveMeter } from "./meter-resolver.js";
+import { runMeterWindow } from "./meter.js";
 import {
-  evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
-} from "./success-criteria.js";
-
-const TICKS_PER_SECOND = 60;
-
-function readMeasured(snapshot) {
-  if (typeof snapshot.measured === "number") return snapshot.measured;
-  if (typeof snapshot.cumulative_produced === "number") return snapshot.cumulative_produced;
-  throw new Error(`meter script must return numeric measured (or legacy cumulative_produced)`);
-}
-
-// Same `ok === false` semantics as observe.js: tolerate scripts that conflate
-// ok with "passes threshold" so long as they still return a usable measured.
-function assertSnapshotUsable(snap) {
-  if (snap && snap.ok === false
-      && typeof snap.measured !== "number"
-      && typeof snap.cumulative_produced !== "number") {
-    throw new Error(`meter script failed: ${snap.error || "unknown"}`);
-  }
-}
+  buildPlacementProposal,
+  buildConnectionProposal,
+} from "./executor-proposal.js";
 
 // Derive harness port_specs from plan placements and their modules.
 // Returns { placements: [...], port_specs: [...] } suitable for place_harness action.
@@ -101,18 +90,22 @@ function derivePowerHarnessManifest(plan, modules) {
   return placements;
 }
 
+async function writeProposal(outDir, proposal) {
+  await writeFile(join(outDir, "proposal.json"), JSON.stringify(proposal, null, 2), "utf8");
+}
+
 /**
  * @param {object} args
  * @param {object} args.controller     — FactorioController
  * @param {object} args.epoch          — epoch metadata
  * @param {object} args.plan           — plan.yaml object
  * @param {Map<string, object>} args.modules — module map (lib + staged)
- * @param {string} args.outDir         — plans/<run>/candidates/cN/ directory
- * @param {string} [args.stateYamlPath] — path to state.yaml
- * @returns {Promise<{verdict: object, perPlacement?: object[]}>}
+ * @param {string} args.outDir         — plans/<run>/candidates/cN/execute/ directory
+ * @param {string} [args.savePathOut]  — destination zip for the winner save (pass-only)
+ * @returns {Promise<{verdict: object, perPlacement: object[], savePath: ?string}>}
  */
 export async function runVerify({
-  controller, epoch, plan, modules, outDir, stateYamlPath,
+  controller, epoch, plan, modules, outDir, savePathOut,
 }) {
   await mkdir(outDir, { recursive: true });
 
@@ -122,7 +115,9 @@ export async function runVerify({
     throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
   }
 
-  // Step 2: place modules (reuse execute.js helpers)
+  // Step 2: place modules (reuse execute.js helpers). On failure we write
+  // proposal.json so the recovery loop's next design call sees a focused
+  // root_cause + suggested_changes record (designer-history.yaml plumbing).
   await runPreparation({ controller, plan, log: () => {} });
   const perPlacement = [];
   for (const placement of plan.placements) {
@@ -131,14 +126,35 @@ export async function runVerify({
       perPlacement.push({ placement, ok: true, dry: result.dry, live: result.live });
     } catch (err) {
       perPlacement.push({ placement, ok: false, error: err.message });
+      const failedStep = plan.placements.findIndex((p) => p.id === placement.id);
+      await writeProposal(outDir, buildPlacementProposal(failedStep, placement, err));
       throw err;
     }
   }
 
-  // Step 3: route connections
-  await routeConnections({ controller, plan, modules, log: () => {} });
+  // Step 3: route connections — same proposal.json shape as placement.
+  try {
+    await routeConnections({ controller, plan, modules, log: () => {} });
+  } catch (connError) {
+    // routeConnections throws "connection <from>→<to> failed: <reason>".
+    // Parse the from/to back so the proposal can name the offending pair.
+    const match = (connError.message || "").match(/^connection (\S+)→(\S+) failed: /);
+    const conn = match
+      ? (plan.connections || []).find((c) => c.from === match[1] && c.to === match[2])
+      : null;
+    await writeProposal(outDir, buildConnectionProposal(
+      conn ?? (match ? { from: match[1], to: match[2] } : null),
+      connError,
+    ));
+    throw connError;
+  }
 
-  // Step 4: place item harness
+  // Step 4: snapshot the clean post-placement world. This IS the winner
+  // save; if the meter window passes we rollback to it and dump it to disk
+  // at savePathOut.
+  await controller.snapshot("pre-harness");
+
+  // Step 5: place item harness (taps belts + inventory ports for measurement).
   const harnessManifest = deriveHarnessManifest(plan, modules);
   let placedHarnessManifest = [];
   if (harnessManifest.length > 0) {
@@ -148,133 +164,44 @@ export async function runVerify({
     placedHarnessManifest = Array.isArray(placeResult?.manifest) ? placeResult.manifest : [];
   }
 
-  // Step 4b: place power harness (accumulator + pole at power ports)
+  // Step 5b: place power harness (accumulator + pole at power ports).
   const powerHarnessManifest = derivePowerHarnessManifest(plan, modules);
   if (powerHarnessManifest.length > 0) {
     await controller.action("power_harness_setup", { placements: powerHarnessManifest });
   }
 
-  // Step 5: resolve meter configuration
-  const resolved = resolveMeter({
+  // Step 6: meter window with harness ticker. Chunked at 600 ticks (10s
+  // game-time) so the harness can fire mid-window. observe.js calls the
+  // same helper without onAdvance/chunkTicks for a single-shot advance.
+  const verdict = await runMeterWindow({
+    controller,
     targetMetric: epoch.target_metric,
     modules,
     plan,
     stagedDir: outDir.replace(/\/execute$/, "") + "/staged-modules",
     rootDir: controller.config.rootDir,
+    successCriteria: epoch.success_criteria,
+    outDir,
+    outName: "verify.json",
+    chunkTicks: 600,
+    onAdvance: placedHarnessManifest.length > 0
+      ? async () => { await controller.action("harness_tick", { manifest: placedHarnessManifest }); }
+      : undefined,
   });
-  const { scriptPath, params, aggregate, metric, item, moduleId, meterId } = resolved;
-  const windowTicks = params.window_ticks ?? 3600;
 
-  // Resolve success criteria
-  const successCriteria = epoch.success_criteria;
-  const criteria = (successCriteria && successCriteria.length > 0)
-    ? successCriteria
-    : (coerceLegacyCriteria({ targetMetric: epoch.target_metric, defaultMetric: metric }).length > 0
-        ? coerceLegacyCriteria({ targetMetric: epoch.target_metric, defaultMetric: metric })
-        : [{ kind: "nonzero", metric }]);
-  validateCriteria(criteria);
-
-  // Step 6: run meter window with harness ticker. advanceTicks drives the
-  // simulation forward sim-tick by sim-tick (matches observe.js semantics);
-  // chunking lets the harness ticker fire every 600 ticks (10s game-time).
-  const verifyStart = Date.now();
-  let ticksElapsed = 0;
-  let before = null, after;
-
-  if (aggregate === "snapshot_post") {
-    while (ticksElapsed < windowTicks) {
-      const chunk = Math.min(windowTicks - ticksElapsed, 600);
-      await controller.advanceTicks(chunk);
-      ticksElapsed += chunk;
-
-      if (placedHarnessManifest.length > 0) {
-        await controller.action("harness_tick", { manifest: placedHarnessManifest });
-      }
-    }
-    after = await controller.runLuaScript(scriptPath, params);
-    assertSnapshotUsable(after);
-  } else {
-    before = await controller.runLuaScript(scriptPath, params);
-    assertSnapshotUsable(before);
-
-    while (ticksElapsed < windowTicks) {
-      const chunk = Math.min(windowTicks - ticksElapsed, 600);
-      await controller.advanceTicks(chunk);
-      ticksElapsed += chunk;
-
-      if (placedHarnessManifest.length > 0) {
-        await controller.action("harness_tick", { manifest: placedHarnessManifest });
-      }
-    }
-
-    after = await controller.runLuaScript(scriptPath, params);
-    assertSnapshotUsable(after);
+  // Step 7: on pass, rewind to the clean snapshot and export the winner zip.
+  // No teardown needed — rollback discards the harness; on fail, the next
+  // recovery attempt's loadSave(inputSave) at the top of the loop wipes the
+  // dirty world.
+  let savePath = null;
+  if (verdict.pass && savePathOut) {
+    await controller.rollback("pre-harness");
+    savePath = await controller.exportZip(savePathOut);
+    // Re-emit verify.json with savePath so run-summary's no-meta fallback
+    // and any debug tooling can find the winner zip from the verdict alone.
+    verdict.savePath = savePath;
+    await writeFile(resolve(outDir, "verify.json"), JSON.stringify(verdict, null, 2), "utf8");
   }
 
-  const wall_clock_ms = Date.now() - verifyStart;
-  const entity_count = await controller.countEntities().catch(() => null);
-
-  // Step 7: compute measured value
-  const tickDelta = before ? (after.tick - before.tick) : windowTicks;
-  const seconds = tickDelta / TICKS_PER_SECOND;
-
-  let measured, producedDelta = null;
-  if (aggregate === "rate_from_cumulative") {
-    producedDelta = readMeasured(after) - readMeasured(before);
-    measured = seconds > 0 ? producedDelta / seconds : 0;
-  } else if (aggregate === "snapshot_post") {
-    measured = readMeasured(after);
-  } else if (aggregate === "snapshot_avg") {
-    measured = (readMeasured(before) + readMeasured(after)) / 2;
-  } else {
-    throw new Error(`unsupported aggregate: ${aggregate}`);
-  }
-
-  // Step 8: evaluate criteria
-  const ctx = {
-    measured,
-    metric,
-    snapshot: after || null,
-    executeOk: true,
-    countEntities: (name) => controller.countEntitiesByName({ name }),
-  };
-  const { pass, results: criteriaResults } = await evaluateCriteria(criteria, ctx);
-
-  const { threshold } = headlineThreshold(criteria);
-
-  const verdict = {
-    pass,
-    item,
-    metric,
-    measured,
-    threshold,
-    aggregate,
-    criteria: criteriaResults,
-    window_ticks_requested: windowTicks,
-    window_ticks_actual: tickDelta,
-    seconds_actual: seconds,
-    produced_delta: producedDelta,
-    wall_clock_ms,
-    entity_count,
-    before,
-    after,
-    meter_script: resolved.scriptRel,
-    module_id: moduleId,
-    meter_id: meterId,
-    timestamp: new Date().toISOString(),
-  };
-
-  // Step 9: teardown harness (always, regardless of verdict)
-  // Both item and power harness entities live on audit-harness force, so
-  // a single harness_teardown call destroys all of them.
-  if (harnessManifest.length > 0 || powerHarnessManifest.length > 0) {
-    await controller.action("harness_teardown");
-  }
-
-  // Write verify.json (observe writes its own observe.json alongside, so split
-  // names avoid the same-filename collision in the candidate dir).
-  await mkdir(dirname(resolve(outDir, "verify.json")), { recursive: true });
-  await writeFile(resolve(outDir, "verify.json"), JSON.stringify(verdict, null, 2), "utf8");
-
-  return { verdict, perPlacement };
+  return { verdict, perPlacement, savePath };
 }
