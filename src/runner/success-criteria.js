@@ -1,6 +1,6 @@
 // success-criteria.js — pure evaluators for epoch.success_criteria.
 //
-// epoch.yaml may declare:
+// epoch.md may declare:
 //
 //   success_criteria:
 //     - { kind: build_only }                                 # execute phase succeeded

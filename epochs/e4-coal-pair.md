@@ -1,0 +1,42 @@
+---
+id: e4-coal-pair
+kind: composition
+depends_on:
+  - e0-bootstrap
+input_save: state/saves/e0-bootstrap-v1.zip
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: coal
+    min_rate_per_s: 0.3
+    window_ticks: 3600
+allowed_modules:
+  - coal-burner-cell
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 600000
+  execute_timeout_ms: 600000
+output_save: state/saves/e4-coal-pair-v1.zip
+---
+
+Place TWO coal-burner-cell modules on the coal patch at distinct,
+non-overlapping anchors, and sustain a combined net coal production rate
+of at least 0.30 coal/s for one minute. This is a deliberate replication
+test — unlike e1-e3 where why_not_replicate justified a single module,
+here the epoch goal requests N=2. It validates:
+
+(a) Designer producing a 2-placement plan from a single allowed module
+    and committing two distinct anchors on the same coal patch.
+(b) dry-validate's footprint non-overlap check firing on real data
+    (e1-e3 each had one placement so this branch was dead-code-tested
+    only in unit-shaped scenarios).
+(c) Execute calling place_one twice deterministically; each blueprint
+    placement consumes inventory independently and the second placement
+    does not collide with the first.
+(d) Meter measuring force-wide cumulative throughput, which sums across
+    both cells. This matters for any future cross-module composition
+    epoch where observe measures the whole factory's flow.
+
+Fresh e0 inventory has 4 burner-mining-drills, 20 belts, 8 inserters, 4
+iron-chests, 50 coal — comfortable margin for 2 × (1 drill, 3 belts, 2
+inserters, 1 chest, 5 coal seed = 12 coal total).

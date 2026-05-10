@@ -1,0 +1,46 @@
+---
+id: e7-unreachable-iron
+kind: composition
+depends_on:
+  - e0-bootstrap
+input_save: state/saves/e0-bootstrap-v1.zip
+recovery_attempts: 3
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: iron-plate
+    min_rate_per_s: 0.1
+    window_ticks: 3600
+allowed_modules:
+  - coal-burner-cell
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 600000
+  execute_timeout_ms: 600000
+output_save: state/saves/e7-unreachable-iron-v1.zip
+---
+
+Stress-test the all-attempts-fail recovery path with a TARGET ITEM that
+the allowed module physically cannot produce. coal-burner-cell is a
+drill+chest combo with NO furnace, so it cannot smelt iron-plate. We
+ask the meter to measure iron-plate throughput; the LLM has no escape:
+
+  - It can't author new modules (allow_module_creation is unset / false).
+  - It can't relocate to a different ore patch — even drilling iron-ore
+    doesn't produce iron-plate without a furnace downstream.
+  - It can't synthesise a furnace via execute repair (repair pi only
+    fires on placement failure, not on throughput shortfall).
+
+Expected outcome: ok=false after 3 attempts, with each verdict.measured
+flat-zero. Earlier draft of this epoch used iron-ore as the target — but
+burner-mining-drill mines whatever ore is below it, so qwen3.6-plus
+passed at attempt 2 by relocating to an iron patch (recorded as a
+surprise, see git history). iron-plate closes the loophole.
+
+This validates:
+  (a) epoch.js winning=null branch returns cleanly without throwing
+  (b) writeDigest tolerates pass=false verdicts
+  (c) lib/modules/ stays unchanged (no false promotion)
+  (d) run-meta.json + summary.md render fail-only runs correctly
+  (e) attempts return shape is uniformly {attempts: <number>,
+      attemptsDetail: [...]} on the failure path

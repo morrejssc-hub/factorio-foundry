@@ -1,0 +1,29 @@
+---
+id: e2-first-iron
+kind: composition
+depends_on:
+  - e1-first-coal
+input_save: state/saves/e1-first-coal/
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: iron-plate
+    min_rate_per_s: 0.05
+    window_ticks: 3600
+allowed_modules:
+  - iron-smelt-line
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 600000
+  execute_timeout_ms: 600000
+output_save: state/saves/e2-first-iron/
+---
+
+On top of the e1 save (which already has a self-fueling coal cell running),
+place a single iron-smelt-line module on an iron-ore patch and sustain a
+net iron-plate production rate of at least 0.05 plate/s for one minute.
+This validates that (a) the Designer picks a different module from lib/
+given a different goal, (b) probe correctly reports iron_patches with the
+generalized find-resource-patch.lua, and (c) the deterministic compiler
+places a multi-entity blueprint that includes a stone furnace adjacent to
+a burner mining drill (drop-into-furnace geometry).

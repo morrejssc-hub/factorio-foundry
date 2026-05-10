@@ -9,7 +9,7 @@
 //       c1/ ...
 //     manifest.json
 //     run-meta.json
-//     designer-history.yaml
+//     designer-history.md
 //
 //   state/saves/<epoch.id>/
 //     <runTs>-c0.zip    (candidate save, GC'd if not winner)
@@ -38,7 +38,7 @@ export function winnerSavePath(saveDir) {
   return join(saveDir, "winner.zip");
 }
 
-// Resolve input_save field from epoch yaml.
+// Resolve input_save field from epoch spec.
 // - If the value ends with ".zip" → literal file path (backward compat).
 // - Otherwise (directory form, e.g. "state/saves/e1-first-coal/") → winner.zip inside.
 export function resolveInputSave(config, inputSave) {

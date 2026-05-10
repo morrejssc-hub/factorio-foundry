@@ -15,7 +15,7 @@ targeted probes when `state.yaml` alone is insufficient (e.g.
 
 - `state.yaml` — Probe output. This is the FULL world view; respect your
   region boundary regardless.
-- `epoch.yaml` — the parent epoch's spec (target metric, allowed modules).
+- `epoch.md` — the parent epoch's spec (target metric, allowed modules).
 - `contract.yaml` — YOUR contract from the parent decomposition: `sub_id`,
   `region` bbox, `inputs[]` / `outputs[]` ports with `paired_with`
   declarations and target rates, optional `allowed_modules` subset.
@@ -55,7 +55,7 @@ requires EXACTLY these top-level keys:
 | `extra`                      | optional | open mapping for non-schema observations                                   |
 
 ⚠️ **`mode` must be `"fragment"`**. The parent epoch may use
-`mode: decompose` and you'll see that word everywhere in `epoch.yaml`,
+`mode: decompose` and you'll see that word everywhere in `epoch.md`,
 but YOUR output is a fragment — `mode: fragment`. Writing `decompose`
 here causes the merge step to reject your fragment and fails the whole
 epoch.

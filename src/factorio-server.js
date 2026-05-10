@@ -3559,16 +3559,16 @@ rcon.print("names=" .. table.concat(names, ","))
     return { destroyed, names, output };
   }
 
-  // Create the audit-harness force idempotently. Called at server boot.
+  // Create the verify-harness force idempotently. Called at server boot.
   async ensureHarnessForce() {
     const body = `
-if not game.forces["audit-harness"] then
-  local f = game.create_force("audit-harness")
+if not game.forces["verify-harness"] then
+  local f = game.create_force("verify-harness")
   f.research_all_technologies()
   f.set_cease_fire("player", true)
-  game.forces.player.set_cease_fire("audit-harness", true)
+  game.forces.player.set_cease_fire("verify-harness", true)
   f.set_friend("player", true)
-  game.forces.player.set_friend("audit-harness", true)
+  game.forces.player.set_friend("verify-harness", true)
 end
 rcon.print("ok=true")
 `;
@@ -3586,7 +3586,7 @@ local placements = ${luaValue(placements)}
 local surface = game.surfaces[${luaValue(surface)}]
 if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
 
-local harness_force = game.forces["audit-harness"]
+local harness_force = game.forces["verify-harness"]
 if not harness_force then
   rcon.print("ok=false"); rcon.print("error=harness_force_missing"); return
 end
@@ -3748,7 +3748,7 @@ rcon.print("ticked=" .. #manifest)
 local surface = game.surfaces[${luaValue(surface)}]
 if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
 
-local entities = surface.find_entities_filtered{force = "audit-harness"}
+local entities = surface.find_entities_filtered{force = "verify-harness"}
 local destroyed = 0
 for _, e in ipairs(entities) do
   if e.valid then
@@ -3779,7 +3779,7 @@ local placements = ${luaValue(placements)}
 local surface = game.surfaces[${luaValue(surface)}]
 if not surface then rcon.print("ok=false"); rcon.print("error=missing_surface"); return end
 
-local harness_force = game.forces["audit-harness"]
+local harness_force = game.forces["verify-harness"]
 if not harness_force then
   rcon.print("ok=false"); rcon.print("error=harness_force_missing"); return
 end
@@ -3897,10 +3897,10 @@ rcon.print("manifest=" .. helpers.table_to_json(manifest))
   }
 
   // Destroy all harness entities (includes power harness accumulator/poles).
-  // Reuses the same audit-harness force teardown — all entities on that force
+  // Reuses the same verify-harness force teardown — all entities on that force
   // are destroyed, whether they came from item or power harness.
   async powerHarnessTeardown(input) {
-    // Delegated to harnessTeardown which already destroys all audit-harness force entities.
+    // Delegated to harnessTeardown which already destroys all verify-harness force entities.
     return this.harnessTeardown(input);
   }
 

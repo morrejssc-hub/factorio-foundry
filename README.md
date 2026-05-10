@@ -4,13 +4,13 @@ A Factorio agent built on a deliberate inversion: **the LLM writes code (module 
 
 ## Pipeline
 
-Six phases per composition epoch:
+Five phases per composition epoch:
 
 ```
-probe → design → dry-validate → verify → execute → observe
+probe → design → dry-validate → verify → observe
 ```
 
-Designer has no `factorio_action` tool — placement is selected, not improvised. Observe is deterministic and never invokes the LLM.
+Designer has no `factorio_action` tool — placement is selected, not improvised. Verify runs on disposable verifier clones; only the winning plan is replayed on the primary for observe/export. Observe is deterministic and never invokes the LLM.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ npm test
 - `src/runner/` — phase implementations and the `FactorioController` facade
 - `lib/modules/` + `lib/blueprints/` — module library (port contracts + entity geometry)
 - `lib/meters/` + `lib/probes/` — lua scripts for measurement and read-only probes
-- `epochs/` — task DAG (input save → target metric)
+- `epochs/` — task DAG (`*.md` frontmatter + goal body)
 - `state/` — saves, digests, world.md (gitignored)
 - `prompts/` — exact contract each LLM phase sees
 

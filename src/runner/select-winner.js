@@ -3,11 +3,11 @@
 // pickWinner(candidates, objective) where candidates is an array of
 // attemptRecord entries from epoch.js (must have .candidate + .verify fields).
 //
-// objective (from epoch yaml `optimize` field, optional):
+// objective (from epoch spec `optimize` field, optional):
 //   "max throughput"  — rank by verify.measured descending (default)
 //   { score: "throughput - 0.001 * entity_count" }
 //     — evaluated as a JS expression with throughput / entity_count / footprint_tiles
-//       variables; trusted epoch-yaml content only.
+//       variables; trusted epoch content only.
 
 export function pickWinner(candidates, objective = "max throughput") {
   const passing = candidates.filter((r) => r.verify?.pass);

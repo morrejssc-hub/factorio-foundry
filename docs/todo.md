@@ -10,26 +10,6 @@ This is the single forward-looking doc. Everything here is intentionally deferre
 
 **What unblocks.** Decide whether parallel candidates are an "exploration" (no feedback, on purpose) or a "retry pool" (feedback per slot, expensive). The shape of the fix depends on that decision.
 
-## audit-harness Factorio force rename
-
-**What.** The harness force is named `audit-harness` in `src/factorio-server.js` Lua + several `find_entities_filtered{force = "audit-harness"}` calls in module/probe scripts. Rename to `verify-harness` so the in-game force matches the phase that owns it.
-
-**Why deferred.** The recent audit→observe / audit script→meter rename intentionally skipped this; the Lua surface has more touch points and an in-flight save loaded by an old runner could still reference the old force name.
-
-**What unblocks.** Any session that's also doing other Lua-side work in `factorio-server.js` (cheap to bundle).
-
-## epoch.yaml → epoch.md migration
-
-**What.** Per the format-rigor principle (since-deleted `inventory-and-craft-design.md` strand C2): split each `epoch.yaml` into `epoch.md` with frontmatter for runner-consumed fields + a body for the prose `goal`. Source artifacts that are agent-readable should be MD with fences, not YAML — the LLM reads `goal:` as prose anyway.
-
-**Why deferred.** Working YAML works. Migrate when a real friction point appears (e.g., a goal that wants markdown formatting that yaml string-escapes badly).
-
-## designer-history.yaml → designer-history.md migration
-
-**What.** Per former strand C1: convert the cross-attempt failure narrative to MD with `executor_proposal` fields in a yaml fence. Cross-attempt narrative is the only consumer; MD is more natural.
-
-**Why deferred.** Same as epoch.yaml — works today.
-
 ## Mod-based per-tick observe sampling
 
 **What.** A small Factorio mod registered for `on_nth_tick(6, ...)` that samples each tracked entity's `status == working` state during the observe window and accumulates a "fraction of window where active" score. Result is read at end via `script-output`.

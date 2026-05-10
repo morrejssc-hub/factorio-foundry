@@ -97,7 +97,7 @@ function validateFragment(parsed, sub) {
 async function runOneSubDesigner({ config, epoch, sub, probeDir, parentStagedDir, subDir, log }) {
   await mkdir(subDir, { recursive: true });
   await copyFile(join(probeDir, "state.yaml"), join(subDir, "state.yaml"));
-  await copyFile(epoch._path, join(subDir, "epoch.yaml"));
+  await copyFile(epoch._path, join(subDir, "epoch.md"));
   await ensureSymlink(config.libDir, join(subDir, "lib"));
   if (parentStagedDir) {
     await ensureSymlink(parentStagedDir, join(subDir, "staged-modules"));
@@ -120,7 +120,7 @@ async function runOneSubDesigner({ config, epoch, sub, probeDir, parentStagedDir
     ``,
     `Inputs in your cwd:`,
     `  - state.yaml (probe output, full world)`,
-    `  - epoch.yaml`,
+    `  - epoch.md`,
     `  - contract.yaml (YOUR region + port contract — read this first)`,
     `  - lib/modules/*.yaml, lib/blueprints/*.json (read-only)`,
     parentStagedDir ? `  - staged-modules/ (read-only modules authored by the parent designer)` : ``,
@@ -176,7 +176,7 @@ async function runOneSubDesigner({ config, epoch, sub, probeDir, parentStagedDir
 
     // One schema retry, parallel to design.js. Sub-designers are particularly
     // prone to writing `mode: decompose` (contagion from the parent's
-    // epoch.yaml wording) — give them one corrective shot before failing
+    // epoch.md wording) — give them one corrective shot before failing
     // the whole epoch.
     if (errors.length) {
       const previousYaml = text ?? "(no plan-fragment.yaml was written)";

@@ -1,0 +1,65 @@
+---
+id: e_test_decompose-coal-iron
+kind: composition
+depends_on:
+  - e0-bootstrap
+input_save: state/saves/e0-bootstrap-v1.zip
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: iron-plate
+    min_rate_per_s: 0.05
+    window_ticks: 3600
+allowed_modules:
+  - coal-burner-cell
+  - iron-smelt-line
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 1200000
+  execute_timeout_ms: 600000
+recovery_attempts: 1
+output_save: state/saves/e_test_decompose-coal-iron-v1.zip
+---
+
+*** DECOMPOSITION-MODE VERIFICATION EPOCH ***
+
+This epoch exists ONLY to exercise the decomposition code path. You MUST
+output decomposition mode (`mode: decompose`). DO NOT output single-mode
+plan.yaml — that bypasses the path under test and makes this epoch
+worthless. If you are tempted to output `placements:` at the top level,
+STOP and re-read prompts/design.md "Decomposition mode" section.
+
+Required structure (write this exact 3-key shape into plan.yaml):
+
+    mode: decompose
+    epoch: e_test_decompose-coal-iron
+    subs:
+      - id: coal-region
+        region: { x_min: -100, x_max: -60, y_min: -30, y_max: 10 }
+        contract:
+          inputs: []
+          outputs:
+            - id: coal_out
+              item: coal
+              rate: 0.18
+              paired_with: iron-region.coal_in
+        allowed_modules: [coal-burner-cell]
+      - id: iron-region
+        region: { x_min: -100, x_max: -60, y_min: -90, y_max: -45 }
+        contract:
+          inputs:
+            - id: coal_in
+              item: coal
+              rate: 0.18
+              paired_with: coal-region.coal_out
+          outputs: []
+        allowed_modules: [iron-smelt-line]
+
+The coal patch sits at ~(-78, -13) and the iron patch at ~(-78, -66) — over
+50 tiles apart vertically. Each sub-designer will pick its own anchor inside
+its region; the runner injects the coal connector belt algorithmically.
+
+This is not a runbook — emit the decomposition yaml exactly as above
+(with the schema you see in prompts/design.md "Decomposition mode" section)
+and exit. The runner handles sub-designer spawn, fragment merge, connector
+routing, and the final plan.yaml synthesis.

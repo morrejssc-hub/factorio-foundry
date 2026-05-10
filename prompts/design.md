@@ -30,7 +30,7 @@ Do NOT call `factorio_action` — any mutation attempt is a violation.
 
 - `state.yaml` — produced by the Probe phase. This is your only view of the
   current world.
-- `epoch.yaml` — the epoch's target metric, allowed modules, and budgets.
+- `epoch.md` — the epoch's target metric, allowed modules, and budgets.
 - `lib/modules/*.yaml` — the module library. **You may only select modules
   that are listed in `epoch.allowed_modules`.** If `epoch.allow_module_creation`
   is true and the epoch's allowed_modules contains an id not in lib/modules/,
@@ -235,7 +235,7 @@ The runner spawns one sub-designer per `subs` entry, gives each its
 contract + the same `state.yaml`, collects each sub's
 `plan-fragment.yaml`, then ALGORITHMICALLY (no LLM) injects connector
 belts between paired ports and builds the final plan that flows into
-dry-validate / verify / execute / observe.
+dry-validate / verify / winner replay / observe.
 
 In decomposition mode you do NOT write `placements` / `connections` /
 `expected_throughput` / `scaling_note` at the top level — those are
@@ -507,16 +507,16 @@ For each id to author:
 
 - yaml/json shape errors → validator rejects, you get a focused retry.
 - module passes shape validation but the blueprint's geometry is wrong
-  (e.g. drill drops onto empty floor instead of furnace) → execute may
+  (e.g. drill drops onto empty floor instead of furnace) → placement may
   succeed but verify will measure ~0 throughput and the epoch fails. There
   is no retry of authoring on verify failure in this iteration; iterate by
   re-running the epoch with prompt adjustments.
 
 ## Reading `executor_proposal` in TASK HISTORY
 
-`designer-history.yaml` may contain entries with an `executor_proposal`
+`designer-history.md` may contain entries with an `executor_proposal`
 field. This is a structured failure record from the executor when a
-prior attempt's `execute` phase couldn't place the plan:
+prior attempt's placement step couldn't place the plan:
 
 ```yaml
 executor_proposal:

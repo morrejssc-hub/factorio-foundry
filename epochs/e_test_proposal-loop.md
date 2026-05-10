@@ -1,18 +1,14 @@
+---
 id: e_test_proposal-loop
 kind: composition
-depends_on: [e0-bootstrap]
+depends_on:
+  - e0-bootstrap
 input_save: state/saves/e0-bootstrap-v1.zip
-goal: |
-  Test fixture: deterministically exercise the executor proposal loop.
-  Attempt 1 emits a plan whose belt connection cannot route (the goal port
-  is 2000 tiles away; A* exhausts maxIterations). Execute writes
-  proposal.json, epoch.js injects executor_proposal into designer-history.
-  Attempt 2 emits a clean coal-burner-cell-only plan that verify passes.
 target_metric:
   meter: lib/meters/throughput-window.lua
   params:
     item: coal
-    min_rate_per_s: 0.10
+    min_rate_per_s: 0.1
     window_ticks: 3600
 allowed_modules:
   - coal-burner-cell
@@ -28,3 +24,10 @@ _fixture:
   attempts:
     - fixtures/proposal-loop/attempt-1
     - fixtures/proposal-loop/attempt-2
+---
+
+Test fixture: deterministically exercise the executor proposal loop.
+Attempt 1 emits a plan whose belt connection cannot route (the goal port
+is 2000 tiles away; A* exhausts maxIterations). Execute writes
+proposal.json, epoch.js injects executor_proposal into designer-history.
+Attempt 2 emits a clean coal-burner-cell-only plan that verify passes.

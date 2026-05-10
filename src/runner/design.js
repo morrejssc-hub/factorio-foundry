@@ -291,9 +291,9 @@ async function validateStagedModules(stagedDir, expectedIds) {
 export async function runDesign({ config, epoch, state, probeDir, outDir, stagedDir, previousAttempts = [], historyPath = null }) {
   await mkdir(outDir, { recursive: true });
   await copyFile(join(probeDir, "state.yaml"), join(outDir, "state.yaml"));
-  await copyFile(epoch._path, join(outDir, "epoch.yaml"));
+  await copyFile(epoch._path, join(outDir, "epoch.md"));
   if (historyPath) {
-    await copyFile(historyPath, join(outDir, "designer-history.yaml"));
+    await copyFile(historyPath, join(outDir, "designer-history.md"));
   }
   // Surface the lib/ tree read-only inside the design cwd so the agent can
   // grep modules and read blueprints without being able to escape upward.
@@ -323,7 +323,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
 
   // Test seam: when epoch._fixture.attempts[i] is set, copy the fixture's
   // plan.yaml + staged-modules into the design cwd and skip the LLM call.
-  // Production epochs never set this key. Used by epochs/e_test_proposal-loop.yaml
+  // Production epochs never set this key. Used by epochs/e_test_proposal-loop.md
   // to deterministically force a known-bad plan and exercise the executor
   // proposal-loop end-to-end without depending on LLM cooperation.
   const fixtureBase = epoch._fixture?.attempts?.[previousAttempts.length];
@@ -376,7 +376,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `    the prose is yours to read for context and edit if you want to`,
     `    leave notes for future epochs. Reference items in world_inventory`,
     `    before designing fresh mining — reuse beats re-extract.)`,
-    `  - epoch.yaml`,
+    `  - epoch.md`,
     `  - lib/modules/*.yaml, lib/blueprints/*.json (read-only)`,
     ...(allowAuthor ? [`  - staged-modules/ (writable: place new module files here)`] : []),
     ``,
@@ -447,7 +447,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `In decomposition mode, the runner spawns one sub-designer per \`subs\``,
     `entry to fill placements; YOU do not write \`placements\` / \`connections\``,
     `/ \`expected_throughput\` / \`scaling_note\` at the top level — those are`,
-    `synthesised. If the epoch yaml strongly suggests decomposition (e.g.`,
+    `synthesised. If the epoch spec strongly suggests decomposition (e.g.`,
     `"this epoch verifies decomposition"), choose mode (B). Otherwise default`,
     `to (A).`,
     ``,
@@ -464,7 +464,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     userMessageLines.push(
       ``,
       `--- TASK HISTORY ---`,
-      `This is attempt ${previousAttempts.length + 1}. Read \`designer-history.yaml\``,
+      `This is attempt ${previousAttempts.length + 1}. Read \`designer-history.md\``,
       `in your working directory — it contains every prior attempt's placements,`,
       `expected_throughput, scaling_note, and verify result (measured vs threshold).`,
       `Use this history to reason about what strategy to change, not just which`,
@@ -526,7 +526,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       // downstream phases (dry-validate / verify / execute / observe) consume the same
       // shape they always have. No in-call retry: errors throw and the outer
       // recovery_attempts loop in epoch.js retries the whole epoch with the
-      // failure surfaced via designer-history.yaml.
+      // failure surfaced via designer-history.md.
       const dval = validateDecomposition(parsed);
       for (const w of dval.warnings || []) console.log(`[design normalize] ${w}`);
       if (dval.errors.length) {

@@ -33,7 +33,7 @@ end
 local function find_pole_near(surface, pos, radius, force_name)
   -- Prefer a player-force pole (the module's own pole — its network
   -- carries actual production stats). The harness pole at the port is
-  -- on audit-harness force and only sees the harness side until the
+  -- on verify-harness force and only sees the harness side until the
   -- harness setup wires it to the player network. Reading from a
   -- player-force pole avoids that timing window.
   local poles = surface.find_entities_filtered{

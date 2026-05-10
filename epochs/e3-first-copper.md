@@ -1,0 +1,29 @@
+---
+id: e3-first-copper
+kind: composition
+depends_on:
+  - e2-first-iron
+input_save: state/saves/e2-first-iron/
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: copper-plate
+    min_rate_per_s: 0.05
+    window_ticks: 3600
+allowed_modules:
+  - copper-smelt-line
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 600000
+  execute_timeout_ms: 600000
+output_save: state/saves/e3-first-copper/
+---
+
+On top of the e2 save (which has e1's coal cell and e2's iron line both
+running), place a single copper-smelt-line module on a copper-ore patch
+and sustain a net copper-plate production rate of at least 0.05 plate/s
+for one minute. This validates that (a) the Designer correctly disambiguates
+among three modules in lib/ given a copper-only allowed_modules constraint,
+(b) the new auto-unwrap + extra: schema-tolerance code path absorbs LLM
+drift without forcing a retry, and (c) probe surfaces non-stock resource
+patches via state.extra.<resource>_patches as the prompt now instructs.

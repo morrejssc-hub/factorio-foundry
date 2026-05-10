@@ -1,0 +1,33 @@
+---
+id: e5-gear
+kind: composition
+depends_on:
+  - e4-steam-power
+input_save: state/saves/e4-steam-power/
+target_metric:
+  meter: lib/meters/throughput-window.lua
+  params:
+    item: iron-gear-wheel
+    min_rate_per_s: 0.05
+    window_ticks: 3600
+allowed_modules:
+  - gear-production
+budgets:
+  probe_timeout_ms: 600000
+  design_timeout_ms: 600000
+  execute_timeout_ms: 600000
+recovery_attempts: 3
+output_save: state/saves/e5-gear/
+---
+
+On top of the e4 save (which has coal, iron, copper, and steam power
+running), place the `gear-production` module that produces iron-gear-wheel
+using an assembling-machine-1 powered by the electric grid.
+
+The module needs iron-plate input (routed from existing iron-smelt-line
+output belt) and electric power (from the steam-power-line grid).
+
+Sustain a net iron-gear-wheel production rate of at least 0.05/s for one minute.
+
+Why this epoch: validates that the system can chain modules together —
+the gear producer depends on iron plates from e2 and power from e4.

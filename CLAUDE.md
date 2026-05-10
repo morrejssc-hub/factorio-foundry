@@ -15,8 +15,8 @@ probe → design → dry-validate → verify → observe
 | `probe` | LLM via `pi` | `state.yaml` | Snapshot persistent world (resource patches, worker, world inventory) |
 | `design` | LLM via `pi` | `plan.yaml` (+ optional staged module files) | Pick modules + anchors + connections |
 | `dry-validate` | JS (deterministic) | `dry-validate.json` | Schema + footprint + tile-canPlace checks |
-| `verify` | JS + Factorio harness | `verify.json` (in `<candidate>/execute/`) + candidate `.zip` save | Place modules, snapshot, place harness, run meter window, gate pass/fail. On pass: rollback to the pre-harness snapshot and export the clean winner zip. |
-| `observe` | JS + Factorio (clean save) | `observe.json` (in `<candidate>/`) | Measure same workload without harness — observational, not gating |
+| `verify` | JS + Factorio harness | `verify.json` (in `<candidate>/execute/`) | Run candidate on a disposable verifier clone, place harness, run meter window, gate pass/fail. No save is exported from the clone. |
+| `observe` | JS + Factorio (clean replay) | `observe.json` (in `<candidate>/`) + candidate `.zip` save | Replay the winning plan on the primary without harness, measure it, then export the clean candidate save. |
 
 Bootstrap epochs (`kind: bootstrap`) skip everything except inventory stocking and a clean save.
 
@@ -48,7 +48,7 @@ lib/
   probes/                 # lua scripts the probe phase calls
   lua-lib/                # shared lua preamble injected into pi probe scripts
 epochs/
-  e<N>-<name>.yaml        # one task: input save → target metric
+  e<N>-<name>.md          # one task: frontmatter input save + target metric, body goal
 state/
   saves/                  # input/output zip chain (gitignored)
   digests/                # one digest per successful epoch (gitignored)
@@ -72,13 +72,14 @@ node scripts/run-dag.js [--from <id>] [--to <id>]   # walk the DAG
 ## Tests
 
 ```bash
-npm test            # node:test, 151 unit tests
+npm test            # node:test suite
 npm run check       # static config / config.js sanity
 ```
 
 ## Conventions
 
 - Phases never reach into `config.rconHost`, `factorio.handleAction`, `rconExec`, `fetch(serviceUrl)` directly. They take a `FactorioController` and call `controller.action / .rcon / .runLuaScript / .read / .advanceTicks / .loadSave / .snapshot / .rollback / .exportZip`.
+- Verify gates run on disposable verifier clones. The primary instance only replays the selected winner for observe/export.
 - The `observe` phase (deterministic verdict, post-verify on the clean save) MUST NOT invoke `pi`. Phase determinism gates the parallel-candidate comparison.
 - New modules go in `staged-modules/` during design, get promoted to `lib/modules/` + `lib/blueprints/` only after the verify phase passes.
 - `world.md`'s yaml fence (`## Deployed modules`) is machine-managed; surrounding prose is agent-managed.

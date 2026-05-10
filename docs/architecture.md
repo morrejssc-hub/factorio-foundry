@@ -26,7 +26,7 @@ LLM-free since 2026-05. Runs `lib/probes/world-census.lua` via RCON, returns clu
 
 ### design (`src/runner/design.js`)
 
-LLM phase. Tools: `read`, `write`, `grep`, `find`, `factorio_api_docs`, `factorio_read`. **No `factorio_action`** — Designer has zero ability to mutate the world. Input: `state.yaml` + `epoch.yaml` + `lib/modules/*.yaml`. Output: `plan.yaml` (placements + connections + optional preparation + scaling note). When `epoch.allow_module_creation: true`, may also author `staged-modules/<id>.yaml` + `<id>.json` blueprints.
+LLM phase. Tools: `read`, `write`, `grep`, `find`, `factorio_api_docs`, `factorio_read`. **No `factorio_action`** — Designer has zero ability to mutate the world. Input: `state.yaml` + `epoch.md` + `lib/modules/*.yaml`. Output: `plan.yaml` (placements + connections + optional preparation + scaling note). When `epoch.allow_module_creation: true`, may also author `staged-modules/<id>.yaml` + `<id>.json` blueprints.
 
 Decomposition mode: design may emit a `mode: decompose` plan that splits the world into regions, each handled by a `sub-designer` (`src/runner/sub-designer.js`). Connector belts between region ports are then wired by `connector-injector.js` (no LLM).
 
@@ -42,29 +42,38 @@ Output: `dry-validate.json` under each candidate dir.
 
 ### verify (`src/runner/verify.js`)
 
-Phase that gates pass/fail AND produces the winner save. On the input save:
+Phase that gates candidate pass/fail. The current hot path is `runVerifyGate`,
+which runs on a disposable verifier instance from `InstancePool`; it does not
+produce the winner save. On the verifier clone loaded from the input save:
 
 1. Run `dry-validate` (static portion).
 2. Run `runPreparation` (`plan.preparation` deconstruct ops, if any).
 3. Place modules via `placeOne` (re-uses helpers from `execute.js`).
 4. Route inter-module connections (`routeConnections`).
-5. **`controller.snapshot("pre-harness")`** — snapshot the clean post-placement world. This IS the winner save.
-6. Place the **harness** on the `audit-harness` Factorio force (chest + bulk-inserter at every belt/inventory port; accumulator + pole at every power port).
-7. Run the meter window via `meter.js#runMeterWindow`: chunked `controller.advanceTicks(600)` ticks (10s game-time per chunk) with a `harness_tick` callback fired after each chunk to refill input chests / drain output chests. The meter script runs before + after; `measured = produced / seconds`.
-8. Evaluate `epoch.success_criteria` against the verdict.
-9. **On pass:** `controller.rollback("pre-harness")` rewinds to step 5's clean state, then `controller.exportZip(savePathOut)` writes the candidate zip.
+5. Place the **harness** on the `verify-harness` Factorio force (chest + bulk-inserter at every belt/inventory port; accumulator + pole at every power port).
+6. Run the meter window via `meter.js#runMeterWindow`: chunked `controller.advanceTicks(600)` ticks (10s game-time per chunk) with a `harness_tick` callback fired after each chunk to refill input chests / drain output chests. The meter script runs before + after; `measured = produced / seconds`.
+7. Evaluate `epoch.success_criteria` against the verdict.
 
-Output: `verify.json` under `<candidate>/execute/` (with `savePath` populated when pass) + the candidate `.zip` save.
+Output: `verify.json` under `<candidate>/execute/`.
 
-The harness lives on a separate Factorio force so its inserter activity does not pollute `force.get_item_production_statistics(player)` reads done by meters. Teardown is implicit — the rollback discards the harness.
+The harness lives on a separate Factorio force so its inserter activity does not pollute `force.get_item_production_statistics(player)` reads done by meters. Teardown is implicit — the verifier clone is reset or shut down after the gate, so harness-bearing worlds are disposable.
 
 `buildPlacementProposal` / `buildConnectionProposal` (from `src/runner/executor-proposal.js`) write a structured `proposal.json` on placement / connection failure — the next design retry sees `{root_cause, suggested_changes, failed_step}` instead of just an error string.
 
-### observe (`src/runner/observe.js`)
+`runVerify` remains as a compatibility wrapper for older callers that still
+expect snapshot -> rollback -> export behavior; `runEpoch` uses `runVerifyGate`.
 
-Same `runMeterWindow` helper as verify, called without the harness ticker. Runs on the in-memory post-verify world (the rolled-back clean-save state). `observe.json` is the observational record: "what does this design actually produce in production?". Never gates pass/fail; never invokes `pi`.
+### winner replay + observe (`src/runner/epoch.js`, `src/runner/observe.js`)
 
-Output: `observe.json` under `<candidate>/`.
+Only a passing candidate is replayed on the primary instance. Sequential mode
+keeps the primary on the input save while verifier clone attempts run; parallel
+mode reloads the primary from the input save after winner selection. Then
+`replayObserveExport` applies the winning plan without the harness, runs
+`observe`, and exports the candidate save.
+
+`observe` uses the same `runMeterWindow` helper as verify, called without the harness ticker. It measures the clean, replayed world. `observe.json` is the observational record: "what does this design actually produce in production?". Never gates pass/fail; never invokes `pi`.
+
+Output: `observe.json` under `<candidate>/` + `state/saves/<epoch>/<runTs>-cN.zip`.
 
 ## FactorioController
 
@@ -78,7 +87,7 @@ Surface:
 - **Reads** — `read(actionName, params)` → POSTs `${serviceUrl}/tool/factorio_read`
 - **Time control** — `advanceTicks(n)` → POSTs `wait_ticks` action
 - **Entity counts** — `countEntities()`, `countEntitiesByName({name, surface})`
-- **Snapshot / rollback** — `snapshot(name)` (RCON `/server-save`, copy zip into `<savesDir>/snapshots/<name>.zip`), `rollback(name)` (stop + swap + start, ~10s), `exportZip(destination)`. Used by verify: snapshot before harness placement, rollback + exportZip on pass.
+- **Snapshot / rollback** — `snapshot(name)` (RCON `/server-save`, copy zip into `<savesDir>/snapshots/<name>.zip`), `rollback(name)` (stop + swap + start, ~10s), `exportZip(destination)`. Used by the legacy `runVerify` wrapper; the current clone gate avoids rollback on the hot path.
 
 `InstancePool` (`src/runner/instance-pool.js`) — N-slot pool for parallel candidates. Each slot owns its own `FactorioServer` + HTTP api + RCON ports + save dir + `FactorioController`. `pool.acquire()` / `pool.release()`.
 
@@ -86,33 +95,37 @@ Surface:
 
 For a composition epoch with `recovery_attempts: N`:
 
-1. `runEpoch` builds a controller from the parent `FactorioServer`.
-2. Sequential: one attempt loop with up to 3 free dry-validate re-designs per attempt; world reset to input save between attempts.
-3. Parallel: `n = config.parallelCandidates` independent designs run concurrently; each gets a slot from `InstancePool`; one winner is picked by `pickWinner`.
-4. Verify-pass winner: verify rolled back to its pre-harness snapshot and exported the candidate zip → `state/saves/<epoch>/<runTs>-c<idx>.zip`. Observe runs on the rolled-back world.
-5. Promote winner: copy candidate zip to `state/saves/<epoch>/winner.zip`, append placements to `state/world.md` `## Deployed modules` fence, write `state/digests/<epoch>.md`.
-6. `<runDir>/run-meta.json` rolls up probe + design + verify + observe blocks per attempt.
-7. `<runDir>/summary.md` is auto-rendered by `run-summary.js` from `run-meta.json`.
+1. `runEpoch` builds a primary controller from the parent `FactorioServer`.
+2. Probe runs once on the primary from the input save.
+3. Sequential: one attempt loop with up to 3 free dry-validate re-designs per attempt; each verify attempt runs on a single verifier clone loaded from the input save. Dirty clones are reset before reuse.
+4. Parallel: `n = config.parallelCandidates` independent designs run concurrently; each verify attempt runs on an `InstancePool` slot. One winner is picked by `pickWinner`.
+5. Verify-pass winner: replay the winning plan on the primary without harness, run observe, then export the clean candidate zip → `state/saves/<epoch>/<runTs>-c<idx>.zip`.
+6. Promote winner: copy candidate zip to `state/saves/<epoch>/winner.zip`, append placements to `state/world.md` `## Deployed modules` fence, write `state/digests/<epoch>.md`.
+7. `<runDir>/run-meta.json` rolls up probe + design + verify + observe blocks per attempt.
+8. `<runDir>/summary.md` is auto-rendered by `run-summary.js` from `run-meta.json`.
 
 ## Save lifecycle
 
 ```
 input_save.zip                       # never mutated
-  ↓ controller.loadSave
-in-memory factorio world             # mutated by verify (placements + connections)
-  ↓ controller.snapshot("pre-harness")
-<savesDir>/snapshots/pre-harness.zip # clean post-placement state
-  ↓ verify places harness, runs meter window
-in-memory factorio world             # dirty (with harness)
-  ↓ verify-pass: controller.rollback("pre-harness")
-in-memory factorio world             # clean again
-  ↓ controller.exportZip
-state/saves/<epoch>/<runTs>-cN.zip   # candidate save (also seeded into verify.json#savePath)
+  ↓ primary controller.loadSave
+primary in-memory world              # probe only; kept clean for replay
+  ↓ verifier clone controller.loadSave
+verifier clone world                 # placements + connections + harness
+  ↓ verify gate
+verifier clone discarded or reset    # no save exported from clone
+  ↓ winner replay on primary
+primary in-memory world              # clean placements + connections, no harness
+  ↓ observe, then controller.exportZip
+state/saves/<epoch>/<runTs>-cN.zip   # candidate save
   ↓ promoteWinner (if winner)
 state/saves/<epoch>/winner.zip       # input for downstream epochs
 ```
 
-The harness-bearing world is discarded by the rollback; nothing harness-related ever reaches the promoted save. On verify-fail, the dirty world is wiped by `controller.loadSave(inputSave)` at the top of the next recovery attempt.
+Harness-bearing worlds exist only in verifier clones. Nothing harness-related
+ever reaches the promoted save. On verify-fail, the dirty clone is reset before
+reuse or shut down with the pool; the primary remains available for the eventual
+winner replay.
 
 ## lib/ layout
 
@@ -124,7 +137,7 @@ The harness-bearing world is discarded by the rollback; nothing harness-related 
 - `lib/probes/` — lua scripts called by the probe phase or by `factorio_read query_script`. Includes `world-census.lua`, `validate-placement.lua`, `find-placement-anchors.lua`, `tile-info.lua`, etc.
 - `lib/lua-lib/` — preamble injected into every pi-submitted probe script. Sandbox helpers. (Currently empty pending evidence — see `todo.md`.)
 
-## epoch.yaml shape
+## epoch.md shape
 
 ```yaml
 id: e1-first-coal

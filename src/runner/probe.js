@@ -75,7 +75,7 @@ function validateState(parsed) {
 /**
  * @param {object} args
  * @param {object} args.controller  — FactorioController
- * @param {object} args.epoch       — parsed epoch yaml
+ * @param {object} args.epoch       — parsed epoch spec
  * @param {string} args.outDir      — plans/<run>/probe/ (will be created)
  * @param {string} [args.inputSavePath] — absolute path to the input save zip
  * @returns {Promise<{stateYamlPath: string, state: object, raw: object, cacheHit: boolean}>}
@@ -94,13 +94,13 @@ export async function runProbe({ controller, epoch, outDir, inputSavePath }) {
   // changing, so cached state.yaml remains correct.
   const { chests: chestsToQuery, rawText: worldMdRaw } = await buildChestsToQuery({ config });
 
-  // Cache lookup — key: (save bytes, epoch.yaml bytes, world-census.lua bytes,
+  // Cache lookup — key: (save bytes, epoch.md bytes, world-census.lua bytes,
   // world.md bytes). world.md bytes ensures registry changes bust the cache.
   let cacheKey = null;
   if (inputSavePath) {
     cacheKey = await probeCacheKey({
       inputSavePath,
-      epochYamlPath: epoch._path,
+      epochPath: epoch._path,
       censusLuaPath: censusSrc,
       worldMdRaw,
     });
