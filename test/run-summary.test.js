@@ -176,7 +176,7 @@ test("scanRunDir falls back when run-meta.json absent (multi-attempt layout)", a
     for (const n of [1, 2, 3]) {
       const dir = join(runDir, `attempt-${n}`);
       await mkdir(join(dir, "execute"), { recursive: true });
-      await writeJson(join(dir, "audit.json"), { pass: n === 3, measured: n === 3 ? 0.99 : 0.25, threshold: 0.95, item: "coal", seconds_actual: 60, produced_delta: 30 });
+      await writeJson(join(dir, "observe.json"), { pass: n === 3, measured: n === 3 ? 0.99 : 0.25, threshold: 0.95, item: "coal", seconds_actual: 60, produced_delta: 30 });
       await writeJson(join(dir, "dry-validate.json"), { ok: true, errors: [] });
       await writeJson(join(dir, "execute", "execute.json"), { ok: true });
       await writePlanYaml(join(dir, "design"), n === 3 ? 4 : 1);

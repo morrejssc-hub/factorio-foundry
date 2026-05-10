@@ -69,6 +69,5 @@ export function loadConfig() {
     servicePort,
     serviceUrl,
     parallelCandidates: envInt("FOUNDRY_PARALLEL_CANDIDATES", 1),
-    benchmarkAudit: envBool("FOUNDRY_BENCHMARK_AUDIT", false),
   };
 }

@@ -41,7 +41,7 @@ function assertSnapshotUsable(snap) {
  *        a legacy `target_metric.threshold` is auto-converted to a single
  *        threshold criterion. If neither is present we fall back to a
  *        `nonzero` criterion so the verdict shape stays uniform.
- * @param {string} args.outDir         — plans/<run>/ directory; audit.json is written here
+ * @param {string} args.outDir         — plans/<run>/ directory; observe.json is written here
  * @param {Map<string, object>} [args.modules]  — module map (lib + staged); required for module-driven shapes
  * @param {object} [args.plan]         — plan.yaml object; required for goal-only metric shape
  * @param {string} [args.stagedDir]    — candidate's staged-modules/ for resolving in-flight audit lua
@@ -130,7 +130,7 @@ export async function runAudit({
     audit_id: auditId,
     timestamp: new Date().toISOString(),
   };
-  await mkdir(dirname(resolve(outDir, "audit.json")), { recursive: true });
-  await writeFile(resolve(outDir, "audit.json"), JSON.stringify(verdict, null, 2), "utf8");
+  await mkdir(dirname(resolve(outDir, "observe.json")), { recursive: true });
+  await writeFile(resolve(outDir, "observe.json"), JSON.stringify(verdict, null, 2), "utf8");
   return verdict;
 }

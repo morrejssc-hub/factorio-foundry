@@ -115,8 +115,7 @@ export class InstancePool {
   }
 
   /**
-   * Return a slot to the pool after its candidate's execute+audit completes.
-   * The slot's Factorio process was already stopped by runBenchmarkAudit.
+   * Return a slot to the pool after its candidate's verify+execute completes.
    */
   release(slot) {
     if (this._waiters.length > 0) {

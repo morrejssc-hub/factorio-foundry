@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 // run-epoch.js — CLI entry point for one epoch.
 //
-//   node scripts/run-epoch.js <epoch-id> [--parallel <N>] [--benchmark]
+//   node scripts/run-epoch.js <epoch-id> [--parallel <N>]
 //
-// --parallel N   run N candidates simultaneously (implies benchmark audit)
-// --benchmark    use Factorio --benchmark flag instead of live 60s audit window
+// --parallel N   run N candidates simultaneously
 import { resolve } from "node:path";
 import { bootFactorioService } from "../src/factorio-process.js";
 import { loadConfig } from "../src/config.js";
@@ -14,7 +13,7 @@ import { loadEpoch, runEpoch } from "../src/runner/epoch.js";
 const args = process.argv.slice(2);
 const epochId = args.find((a) => !a.startsWith("--") && !Number.isFinite(Number(a)));
 if (!epochId) {
-  console.error("usage: run-epoch.js <epoch-id> [--parallel <N>] [--benchmark]");
+  console.error("usage: run-epoch.js <epoch-id> [--parallel <N>]");
   process.exit(2);
 }
 
@@ -27,20 +26,11 @@ if (parallelIdx !== -1) {
   }
   process.env.FOUNDRY_PARALLEL_CANDIDATES = String(n);
 }
-if (args.includes("--benchmark")) {
-  process.env.FOUNDRY_BENCHMARK_AUDIT = "1";
-}
-// Parallel mode always uses benchmark audit (60s/candidate × N would defeat the purpose).
-if (process.env.FOUNDRY_PARALLEL_CANDIDATES && Number(process.env.FOUNDRY_PARALLEL_CANDIDATES) > 1) {
-  process.env.FOUNDRY_BENCHMARK_AUDIT = "1";
-}
 
 const { config, factorio, shutdown } = await bootFactorioService();
 console.log(`[run-epoch] foundry HTTP service: ${config.serviceUrl}`);
 if (config.parallelCandidates > 1) {
-  console.log(`[run-epoch] parallel mode: ${config.parallelCandidates} candidates, benchmark audit`);
-} else if (config.benchmarkAudit) {
-  console.log(`[run-epoch] benchmark audit enabled`);
+  console.log(`[run-epoch] parallel mode: ${config.parallelCandidates} candidates`);
 }
 
 let exitCode = 0;

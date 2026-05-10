@@ -87,7 +87,11 @@ async function scanRunDir(runDir) {
 }
 
 async function scanAttempt(attemptDir, attemptNum, totals) {
-  const audit = await readJsonOrNull(join(attemptDir, "audit.json"));
+  // observe.json (was audit.json) — written by audit.js from the observe
+  // phase, on the clean post-execute world. The verdict shape is the audit
+  // verdict; we keep the field name `audit` here to match run-meta.json's
+  // legacy projection.
+  const audit = await readJsonOrNull(join(attemptDir, "observe.json"));
   const dry = await readJsonOrNull(join(attemptDir, "dry-validate.json"));
   const exec = await readJsonOrNull(join(attemptDir, "execute", "execute.json"));
   const designTrace = await readJsonOrNull(join(attemptDir, "design", "pi-trace.json"));

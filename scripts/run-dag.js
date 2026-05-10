@@ -2,7 +2,7 @@
 // run-dag.js — Run epochs in DAG topological order.
 //
 //   node scripts/run-dag.js [--from <epoch-id>] [--to <epoch-id>] [--force]
-//                           [--parallel <N>] [--benchmark] [--dry-run]
+//                           [--parallel <N>] [--dry-run]
 //
 // Reads epochs/dag.yaml, resolves topological order, and runs each epoch
 // in sequence using the same Factorio service instance. Epochs whose
@@ -11,8 +11,7 @@
 // --from <id>      start from this epoch (and its transitive dependents)
 // --to <id>        stop after this epoch
 // --force          re-run even if output_save already exists
-// --parallel <N>   pass through to each epoch (implies benchmark audit)
-// --benchmark      use fast benchmark audit instead of 60s live window
+// --parallel <N>   pass through to each epoch
 // --dry-run        print the planned execution order and exit without running
 import { resolve } from "node:path";
 import { readFile, access } from "node:fs/promises";
@@ -35,15 +34,10 @@ function parseArgs(argv) {
         process.exit(2);
       }
       process.env.FOUNDRY_PARALLEL_CANDIDATES = String(n);
-    } else if (args[i] === "--benchmark") {
-      process.env.FOUNDRY_BENCHMARK_AUDIT = "1";
     } else {
       console.error(`unknown argument: ${args[i]}`);
       process.exit(2);
     }
-  }
-  if (process.env.FOUNDRY_PARALLEL_CANDIDATES && Number(process.env.FOUNDRY_PARALLEL_CANDIDATES) > 1) {
-    process.env.FOUNDRY_BENCHMARK_AUDIT = "1";
   }
   return out;
 }

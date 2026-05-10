@@ -1,5 +1,5 @@
-// audit-resolver.js — single resolver shared by live runAudit and
-// benchmark-audit. Translates an epoch's `target_metric` into a concrete
+// audit-resolver.js — single resolver shared by runAudit (observe) and
+// runVerify. Translates an epoch's `target_metric` into a concrete
 // {scriptPath, params, aggregate, metric, threshold, item} record by
 // consulting the modules map (lib + staged) when needed.
 //
