@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "name": "gear_production_v1",
+  "description": "Electric assembling-machine-1 crafts iron-gear-wheel from iron-plates. Burner-inserter feeds plates from west-side input belt; second burner-inserter pulls gears from assembler output onto east-side belt leading to a chest. Anchor = assembling-machine-1 center. Place within 7.5 tiles of an energized power pole.",
+  "anchor": "assembling-machine-1 center; place on clear grass near electric grid",
+  "entities": [
+    {
+      "key": "assembler",
+      "item": "assembling-machine-1",
+      "dx": 0,
+      "dy": 0,
+      "direction": "east",
+      "settings": { "recipe": "iron-gear-wheel" }
+    },
+    {
+      "key": "input_belt",
+      "item": "transport-belt",
+      "dx": -3,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "input_inserter",
+      "item": "burner-inserter",
+      "dx": -2,
+      "dy": 0,
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
+    },
+    {
+      "key": "output_inserter",
+      "item": "burner-inserter",
+      "dx": 2,
+      "dy": 0,
+      "direction": "east",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
+    },
+    {
+      "key": "output_belt",
+      "item": "transport-belt",
+      "dx": 3,
+      "dy": 0,
+      "direction": "east"
+    },
+    {
+      "key": "gear_chest",
+      "item": "iron-chest",
+      "dx": 4,
+      "dy": 0,
+      "direction": "north"
+    },
+    {
+      "key": "power_pole",
+      "item": "small-electric-pole",
+      "dx": 0,
+      "dy": -2,
+      "direction": "north"
+    }
+  ],
+  "ports": {
+    "iron_plate_in": {
+      "entity": "input_belt",
+      "kind": "belt",
+      "item": "iron-plate"
+    },
+    "gear_chest": {
+      "entity": "gear_chest",
+      "kind": "inventory",
+      "item": "iron-gear-wheel"
+    }
+  },
+  "assertions": [
+    "assembler_on_clear_ground_within_electric_range",
+    "input_inserter_feeds_plates_from_belt_to_assembler",
+    "output_inserter_picks_gears_from_assembler_onto_output_belt",
+    "output_belt_feeds_into_gear_chest",
+    "power_pole_connects_to_upstream_electric_grid"
+  ]
+}

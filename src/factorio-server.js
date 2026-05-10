@@ -3591,11 +3591,14 @@ if not harness_force then
   rcon.print("ok=false"); rcon.print("error=harness_force_missing"); return
 end
 
+-- Factorio inserter direction = drop side (the side it faces / drops into).
+-- Pickup is the opposite tile. We map logical side names to defines.direction
+-- straight-through so callers compute drop side and pass it here.
 local directions = {
-  north = defines.direction.south,
-  south = defines.direction.north,
-  east = defines.direction.west,
-  west = defines.direction.east,
+  north = defines.direction.north,
+  south = defines.direction.south,
+  east = defines.direction.east,
+  west = defines.direction.west,
 }
 local side_offsets = {
   north = {dx = 0, dy = -1},
@@ -3613,6 +3616,20 @@ local function rotate_rel(dx, dy, dir_name)
   return dx, dy
 end
 
+-- Rotate a side name (north/south/east/west) by the placement direction.
+-- Module-frame side declares which axis the port faces; placement rotation
+-- maps it to world-frame so harness chest/inserter land outside the module.
+local side_rotation = {
+  north = {north="north", east="east",  south="south", west="west"},
+  east  = {north="east",  east="south", south="west",  west="north"},
+  south = {north="south", east="west",  south="north", west="east"},
+  west  = {north="west",  east="north", south="east",  west="south"},
+}
+local function rotate_side(side, dir_name)
+  local row = side_rotation[dir_name] or side_rotation.north
+  return row[side] or side
+end
+
 local manifest = {}
 local total = 0
 
@@ -3625,20 +3642,23 @@ for _, p in ipairs(placements) do
     local port_x = anchor_x + rdx
     local port_y = anchor_y + rdy
 
-    local side_off = side_offsets[port.side]
+    local world_side = rotate_side(port.side, dir)
+    local side_off = side_offsets[world_side]
     local inserter_x = port_x + side_off.dx
     local inserter_y = port_y + side_off.dy
     local chest_x = port_x + side_off.dx * 2
     local chest_y = port_y + side_off.dy * 2
 
-    -- inserter direction: output = toward chest (same as side), input = toward port (opposite of side)
+    -- Factorio inserter direction = the side it picks up from (pickup is forward,
+    -- drop is opposite). Chest sits at world_side from port; inserter sits between.
+    --   input role:  inserter picks from chest (world_side), drops to port → dir = world_side
+    --   output role: inserter picks from port (opposite of world_side), drops to chest → dir = opposite
     local inserter_dir
-    if port.role == "output" then
-      inserter_dir = directions[port.side]
+    if port.role == "input" then
+      inserter_dir = directions[world_side]
     else
-      -- opposite: flip the side direction
       local opposite = {north="south", south="north", east="west", west="east"}
-      inserter_dir = directions[opposite[port.side]]
+      inserter_dir = directions[opposite[world_side]]
     end
 
     local chest = surface.create_entity{
@@ -3671,7 +3691,7 @@ end
 
 rcon.print("ok=true")
 rcon.print("placed=" .. total)
-rcon.print("manifest=" .. game.table_to_json(manifest))
+rcon.print("manifest=" .. helpers.table_to_json(manifest))
 `;
     const output = await this.runTemplateLua("place_harness.lua", body);
     const parsed = parseKeyValueOutput(output);
@@ -3859,7 +3879,7 @@ end
 
 rcon.print("ok=true")
 rcon.print("placed=" .. total)
-rcon.print("manifest=" .. game.table_to_json(manifest))
+rcon.print("manifest=" .. helpers.table_to_json(manifest))
 `;
     const output = await this.runTemplateLua("power_harness_setup.lua", body, 10000);
     const parsed = parseKeyValueOutput(output);

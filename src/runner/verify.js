@@ -180,14 +180,67 @@ export async function runVerify({
 
   // Step 4: place item harness
   const harnessManifest = deriveHarnessManifest(plan, modules);
+  let placedHarnessManifest = [];
   if (harnessManifest.length > 0) {
-    await factorio.handleAction({ action: "place_harness", placements: harnessManifest });
+    console.log(`[verify] harness input: ${JSON.stringify(harnessManifest)}`);
+    const placeResult = await factorio.handleAction({ action: "place_harness", placements: harnessManifest });
+    console.log(`[verify] place_harness result: placed=${placeResult?.placed} manifest=${JSON.stringify(placeResult?.manifest)}`);
+    placedHarnessManifest = Array.isArray(placeResult?.manifest) ? placeResult.manifest : [];
   }
 
   // Step 4b: place power harness (accumulator + pole at power ports)
   const powerHarnessManifest = derivePowerHarnessManifest(plan, modules);
   if (powerHarnessManifest.length > 0) {
     await factorio.handleAction({ action: "power_harness_setup", placements: powerHarnessManifest });
+  }
+
+  // DEBUG: inspect placed entities around the first placement
+  if (plan.placements?.[0]) {
+    const p = plan.placements[0];
+    const inspectLua = `local s=game.surfaces[1]
+local cx,cy=${p.anchor.x},${p.anchor.y}
+local asm=s.find_entities_filtered{position={cx,cy},name="assembling-machine-1"}[1]
+if asm then
+  local recipe=asm.get_recipe() and asm.get_recipe().name or "none"
+  rcon.print("[debug] asm recipe="..recipe.." status="..tostring(asm.status).." energy="..asm.energy)
+  local inv=asm.get_inventory(defines.inventory.assembling_machine_input)
+  if inv then
+    local txt=""
+    for nm,c in pairs(inv.get_contents()) do txt=txt..nm.."="..c.."," end
+    rcon.print("[debug] asm input_inv: "..txt)
+  end
+else rcon.print("[debug] no asm at "..cx..","..cy) end
+-- inspect power poles within 10 tiles of anchor
+local poles = s.find_entities_filtered{area={{cx-10, cy-10},{cx+10, cy+10}}, type="electric-pole"}
+rcon.print("[debug] poles near anchor: "..#poles)
+for _,pl in ipairs(poles) do
+  local ok,err = pcall(function()
+    local nb = 0
+    if pl.neighbours and pl.neighbours.copper then
+      for _ in pairs(pl.neighbours.copper) do nb = nb + 1 end
+    end
+    rcon.print("[debug]   pole "..pl.name.." @("..pl.position.x..","..pl.position.y..") net="..tostring(pl.electric_network_id).." neighbours="..nb)
+  end)
+  if not ok then rcon.print("[debug]   pole err: "..tostring(err)) end
+end
+local hcs=s.find_entities_filtered{name="wooden-chest",force="audit-harness"}
+rcon.print("[debug] harness chests: "..#hcs)
+for _,c in ipairs(hcs) do
+  local inv=c.get_inventory(defines.inventory.chest)
+  local cont=""
+  for nm,n in pairs(inv.get_contents()) do cont=cont..nm.."="..n.."," end
+  rcon.print(string.format("[debug]   chest @(%.0f,%.0f) %s", c.position.x, c.position.y, cont))
+end
+local his=s.find_entities_filtered{name="bulk-inserter",force="audit-harness"}
+rcon.print("[debug] harness inserters: "..#his)
+for _,i in ipairs(his) do
+  rcon.print(string.format("[debug]   ins @(%.0f,%.0f) dir=%s pickup=(%.1f,%.1f) drop=(%.1f,%.1f)", i.position.x, i.position.y, tostring(i.direction), i.pickup_position.x, i.pickup_position.y, i.drop_position.x, i.drop_position.y))
+end`;
+    const debugOut = await rconExec({
+      host: config.rconHost, port: config.rconPort, password: config.rconPassword,
+      command: `/sc ${inspectLua}`, timeoutMs: 15000,
+    });
+    console.log(`[verify-debug] post-harness state:\n${debugOut}`);
   }
 
   // Step 5: resolve audit/meter configuration
@@ -225,8 +278,8 @@ export async function runVerify({
       ticksElapsed += chunk;
 
       // Harness tick every 5s
-      if (harnessManifest.length > 0) {
-        await factorio.handleAction({ action: "harness_tick", manifest: harnessManifest });
+      if (placedHarnessManifest.length > 0) {
+        await factorio.handleAction({ action: "harness_tick", manifest: placedHarnessManifest });
       }
     }
     after = await rconRunScript({ config, scriptPath, params });
@@ -240,8 +293,8 @@ export async function runVerify({
       await new Promise((r) => setTimeout(r, Math.ceil(chunk * msPerTick)));
       ticksElapsed += chunk;
 
-      if (harnessManifest.length > 0) {
-        await factorio.handleAction({ action: "harness_tick", manifest: harnessManifest });
+      if (placedHarnessManifest.length > 0) {
+        await factorio.handleAction({ action: "harness_tick", manifest: placedHarnessManifest });
       }
     }
 
