@@ -6,7 +6,7 @@
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
-import { buildLuaCommand, rconExec } from "../rcon.js";
+import { buildLuaCommand } from "../rcon.js";
 import { normalize, STATE_SCHEMA } from "./schema-norm.js";
 import { probeCacheKey, readProbeCache, writeProbeCache } from "./probe-cache.js";
 import { newTrace, writePiTrace } from "./pi-trace.js";
@@ -74,13 +74,14 @@ function validateState(parsed) {
 
 /**
  * @param {object} args
- * @param {object} args.config
+ * @param {object} args.controller  — FactorioController
  * @param {object} args.epoch       — parsed epoch yaml
  * @param {string} args.outDir      — plans/<run>/probe/ (will be created)
  * @param {string} [args.inputSavePath] — absolute path to the input save zip
  * @returns {Promise<{stateYamlPath: string, state: object, raw: object, cacheHit: boolean}>}
  */
-export async function runProbe({ config, epoch, outDir, inputSavePath }) {
+export async function runProbe({ controller, epoch, outDir, inputSavePath }) {
+  const config = controller.config;
   await mkdir(outDir, { recursive: true });
 
   const stateYamlPath = join(outDir, "state.yaml");
@@ -130,13 +131,10 @@ export async function runProbe({ config, epoch, outDir, inputSavePath }) {
 
   let rawOutput;
   try {
-    rawOutput = await rconExec({
-      host:      config.rconHost,
-      port:      config.rconPort,
-      password:  config.rconPassword,
+    rawOutput = await controller.rcon(
       command,
-      timeoutMs: Math.min(epoch.budgets?.probe_timeout_ms ?? 60_000, 60_000),
-    });
+      Math.min(epoch.budgets?.probe_timeout_ms ?? 60_000, 60_000),
+    );
   } finally {
     trace.wall_ms = Date.now() - t0;
     await writePiTrace(outDir, trace).catch((e) =>

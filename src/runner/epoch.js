@@ -116,7 +116,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   // valid; the cache (probe-cache.js) makes this cheap even across runs.
   log(`[epoch ${epoch.id}] phase 1: probe`);
   const probeResult = await runProbe({
-    config,
+    controller,
     epoch,
     outDir: join(runDir, "probe"),
     inputSavePath: inputSave,
@@ -722,7 +722,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   log(`[epoch ${epoch.id}] phase 1: probe`);
   await controller.loadSave(inputSave);
   const probeResult = await runProbe({
-    config,
+    controller,
     epoch,
     outDir: join(runDir, "probe"),
     inputSavePath: inputSave,
