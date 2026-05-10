@@ -252,24 +252,24 @@ async function validateStagedModules(stagedDir, expectedIds) {
       errors.push(`staged blueprint '${id}' must have a non-empty entities array`);
       continue;
     }
-    // Module-creation epochs may need a fresh audit lua too. Any audits[]
+    // Module-creation epochs may need a fresh meter lua too. Any meters[]
     // entry whose script path starts with `staged-modules/` must resolve to
     // a real .lua file inside stagedDir; we record those for promotion.
-    const stagedAudits = [];
-    let auditError = false;
-    for (const a of (module.audits || [])) {
-      const rel = a.script || "";
+    const stagedMeters = [];
+    let meterError = false;
+    for (const m of (module.meters || [])) {
+      const rel = m.script || "";
       if (!rel.startsWith("staged-modules/")) continue;
       const base = rel.slice("staged-modules/".length);
       if (!entries.includes(base)) {
-        errors.push(`staged module '${id}' audit '${a.id}' references ${rel} but file not found in staged-modules/`);
-        auditError = true;
+        errors.push(`staged module '${id}' meter '${m.id}' references ${rel} but file not found in staged-modules/`);
+        meterError = true;
         continue;
       }
-      stagedAudits.push({ auditId: a.id, basename: base, stagedPath: join(stagedDir, base) });
+      stagedMeters.push({ meterId: m.id, basename: base, stagedPath: join(stagedDir, base) });
     }
-    if (auditError) continue;
-    authored.push({ id, yamlPath, jsonPath, stagedAudits, module });
+    if (meterError) continue;
+    authored.push({ id, yamlPath, jsonPath, stagedMeters, module });
   }
   return { errors, authored };
 }
@@ -313,8 +313,8 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
   // If the epoch allows module creation, surface a writable staged-modules/
   // directory inside the design cwd. The Designer writes new module yaml +
   // blueprint json there; this runner validates them after the pi exits and
-  // the executor + audit treat them as first-class lib entries until the
-  // outer epoch.js promotes them to lib/ on audit pass.
+  // verify + observe treat them as first-class lib entries until the
+  // outer epoch.js promotes them to lib/ on verify pass.
   const allowAuthor = !!epoch.allow_module_creation && !!stagedDir;
   if (allowAuthor) {
     await mkdir(stagedDir, { recursive: true });
@@ -395,14 +395,14 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       `    inputs, outputs (with port name/side/rel_pos/throughput/item/kind),`,
       `    power, footprint (anchor-relative bbox covering all entities),`,
       `    preconditions, realization (blueprint: lib/blueprints/<id>.json`,
-      `    — anticipates promotion), audits.`,
-      `    audits[].metric MUST match the epoch.target_metric.metric when`,
+      `    — anticipates promotion), meters.`,
+      `    meters[].metric MUST match the epoch.target_metric.metric when`,
       `    the epoch uses goal-only target_metric. See prompts/design.md`,
-      `    "Authoring new modules" → "Choosing the audit script".`,
-      `  - staged-modules/<id>-audit.lua — ONLY when the metric is not an`,
+      `    "Authoring new modules" → "Choosing the meter script".`,
+      `  - staged-modules/<id>-meter.lua — ONLY when the metric is not an`,
       `    item rate (e.g. power_kw, pollution_per_s). For item rates reuse`,
-      `    lib/audits/throughput-window.lua; do NOT write a new lua. The`,
-      `    custom audit script returns JSON {ok, tick, measured, ...}.`,
+      `    lib/meters/throughput-window.lua; do NOT write a new lua. The`,
+      `    custom meter script returns JSON {ok, tick, measured, ...}.`,
       `  - staged-modules/<id>.json — blueprint with anchor-relative dx/dy,`,
       `    direction per entity, optional fuel[] for pre-loaded burner items.`,
       `    Use existing lib/blueprints/*.json as a shape reference.`,
@@ -455,7 +455,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
     `created, steps, kind, action, depends_on, formula, assert, entities,`,
     `risks, success_criteria, version, module (top-level), starter_fuel,`,
     `anchor (top-level), or any per-step structure. The runner walks,`,
-    `places, seeds fuel, waits, audits, and saves on its own.`,
+    `places, seeds fuel, waits, verifies, and saves on its own.`,
     ``,
     `Read state.yaml for world coordinates and lib/modules/ for module`,
     `footprints, then write plan.yaml and exit.`,
@@ -466,7 +466,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       `--- TASK HISTORY ---`,
       `This is attempt ${previousAttempts.length + 1}. Read \`designer-history.yaml\``,
       `in your working directory — it contains every prior attempt's placements,`,
-      `expected_throughput, scaling_note, and audit result (measured vs threshold).`,
+      `expected_throughput, scaling_note, and verify result (measured vs threshold).`,
       `Use this history to reason about what strategy to change, not just which`,
       `anchor to move. Consider whether the throughput gap requires a different`,
       `number of placements, not just a different position.`,
@@ -523,7 +523,7 @@ export async function runDesign({ config, epoch, state, probeDir, outDir, staged
       // regions. Validate the decomposition output, spawn sub-designers in
       // parallel, then merge their fragments + inject inter-region connectors
       // algorithmically. The synthesized plan overwrites plan.yaml so the
-      // downstream phases (dry-validate / execute / audit) consume the same
+      // downstream phases (dry-validate / verify / execute / observe) consume the same
       // shape they always have. No in-call retry: errors throw and the outer
       // recovery_attempts loop in epoch.js retries the whole epoch with the
       // failure surfaced via designer-history.yaml.

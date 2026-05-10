@@ -35,7 +35,7 @@ footprint:
 realization:
   blueprint: lib/blueprints/gear-production.json
 
-audits:
+meters:
   - id: gear-production-throughput
-    script: lib/audits/throughput-window.lua
+    script: lib/meters/throughput-window.lua
     params: { item: iron-gear-wheel, min_rate_per_s: 0.05, window_ticks: 3600 }

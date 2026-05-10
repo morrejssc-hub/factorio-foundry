@@ -17,15 +17,15 @@ goal: |
   (c) Execute calling place_one twice deterministically; each blueprint
       placement consumes inventory independently and the second placement
       does not collide with the first.
-  (d) Audit measuring force-wide cumulative throughput, which sums across
+  (d) Meter measuring force-wide cumulative throughput, which sums across
       both cells. This matters for any future cross-module composition
-      epoch where the audit observes the whole factory's flow.
+      epoch where observe measures the whole factory's flow.
 
   Fresh e0 inventory has 4 burner-mining-drills, 20 belts, 8 inserters, 4
   iron-chests, 50 coal — comfortable margin for 2 × (1 drill, 3 belts, 2
   inserters, 1 chest, 5 coal seed = 12 coal total).
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.30

@@ -16,7 +16,7 @@ goal: |
   Steam power is the prerequisite for assembling-machine-1 and electric-mining-drill.
   This epoch validates that the Designer can author a module with:
   (a) non-resource preconditions (water_source), (b) pipe connections between
-  pump→boiler→steam-engine, and (c) power output audit (not throughput-window).
+  pump→boiler→steam-engine, and (c) power output meter (not throughput-window).
 
   This epoch continues the state chain (e0→e1→e2→e3→e4) because subsequent
   red bottle production needs the electric network established here.
@@ -31,9 +31,9 @@ goal: |
   The 100 kW threshold accepts a working but not-yet-optimized plant.
 target_metric:
   # What we're MEASURING. The Designer must author a steam-power-line
-  # module whose audits[] declares an entry with `metric: power_kw`.
-  # The runner finds that audit by metric, runs its script, and records
-  # the value. The audit script reports a snapshot — pass/fail is decided
+  # module whose meters[] declares an entry with `metric: power_kw`.
+  # The runner finds that meter by metric, runs its script, and records
+  # the value. The meter script reports a snapshot — pass/fail is decided
   # by success_criteria below, not by a hard threshold here.
   metric: power_kw
   params:

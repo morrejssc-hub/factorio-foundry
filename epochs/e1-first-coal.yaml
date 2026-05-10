@@ -5,10 +5,10 @@ input_save: state/saves/e0-bootstrap-v1.zip
 goal: |
   Build a self-fueling burner coal mining cell on a coal patch and sustain a
   net coal production rate of at least 0.10 coal/s for one minute. This
-  validates the "select a module from lib, compose, audit deterministically"
+  validates the "select a module from lib, compose, verify/observe deterministically"
   loop end-to-end.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.10

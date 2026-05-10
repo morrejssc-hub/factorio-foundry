@@ -37,9 +37,9 @@ realization:
   starter_fuel:
     - { item: coal, count: 10 }   # bootstrap boiler before belt feed stabilises
 
-# Port-meter audit: dispatcher reads electric_network_statistics on the
+# Port-meter measurement: dispatcher reads electric_network_statistics on the
 # pole at the power_output port. No per-module Lua needed.
-audits:
+meters:
   - id: steam-power-line-power
     port: power_output
     metric: power_kw

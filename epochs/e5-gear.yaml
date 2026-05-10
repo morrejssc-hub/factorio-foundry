@@ -15,7 +15,7 @@ goal: |
   Why this epoch: validates that the system can chain modules together —
   the gear producer depends on iron plates from e2 and power from e4.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: iron-gear-wheel
     min_rate_per_s: 0.05

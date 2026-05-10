@@ -2,9 +2,9 @@
 //
 // Two epoch kinds:
 //   - bootstrap: deterministic. Creates a fresh save, ensures worker, stocks
-//     starter inventory. No probe / design / verify phases.
-//   - composition: full pipeline (probe → design → verify → execute → observe → record).
-//     Operates on an input save, produces an output save.
+//     starter inventory. No probe / design / verify / observe phases.
+//   - composition: full pipeline (probe → design → dry-validate → verify →
+//     execute → observe). Operates on an input save, produces an output save.
 import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -14,7 +14,7 @@ import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
 import { runVerify } from "./verify.js";
 import { runExecute } from "./execute.js";
-import { runAudit } from "./audit.js";
+import { runObserve } from "./observe.js";
 import { InstancePool } from "./instance-pool.js";
 import { FactorioController } from "./factorio-controller.js";
 import { writeSummary } from "./run-summary.js";
@@ -123,7 +123,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   });
   log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
-  // Recovery loop: design → dry-validate → execute → audit, with the
+  // Recovery loop: design → dry-validate → verify → execute → observe, with the
   // world reset to input_save before each retry so each attempt starts
   // from the same blank slate. previousAttempts is fed to design so the
   // next LLM call sees a focused brief on what already failed.
@@ -251,7 +251,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
 
         // Observe: measure the clean save without harness (same meter as verify)
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
-        observeVerdict = await runAudit({
+        observeVerdict = await runObserve({
           controller,
           targetMetric: epoch.target_metric,
           successCriteria: epoch.success_criteria,
@@ -279,7 +279,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         })),
         expected_throughput: designResult.plan.expected_throughput,
         scaling_note: designResult.plan.scaling_note,
-        audit: verdict ? {
+        verify: verdict ? {
           pass: verdict.pass,
           measured: verdict.measured,
           threshold: verdict.threshold,
@@ -289,7 +289,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       await flushHistory();
     } catch (error) {
       attemptError = error.message;
-      log(`[epoch ${epoch.id}] attempt ${attempt} failed before audit: ${error.message}`);
+      log(`[epoch ${epoch.id}] attempt ${attempt} failed before observe: ${error.message}`);
       // If the execute phase wrote a structured proposal.json before throwing,
       // attach it to previousAttempts + designer-history so the next design
       // retry sees a focused failure record (root_cause, suggested_changes)
@@ -315,7 +315,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         })),
         expected_throughput: designResult?.plan?.expected_throughput ?? null,
         scaling_note: designResult?.plan?.scaling_note ?? null,
-        audit: null,
+        verify: null,
         error: error.message,
         executor_proposal: executorProposal,
       });
@@ -323,7 +323,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     }
 
     // Record this attempt's full disposition for run-meta. The earlier
-    // "throw on last pre-audit failure" behaviour is replaced by uniform
+    // "throw on last pre-observe failure" behaviour is replaced by uniform
     // return-with-ok=false; callers can inspect attemptsDetail to see
     // exactly which phase failed.
     attemptRecords.push({
@@ -337,7 +337,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       authored: designResult?.authored?.map((a) => a.id) ?? [],
       dry_validate: dryResult ? { ok: dryResult.ok, errors: dryResult.errors ?? [] } : null,
       execute: exResult ? { ok: !!exResult.savePath, save_path: exResult.savePath } : null,
-      audit: verdict ? {
+      verify: verdict ? {
         pass: verdict.pass,
         measured: verdict.measured,
         threshold: verdict.threshold,
@@ -376,7 +376,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       candidates: attemptRecords.map((r) => ({
         candidate: r.candidate,
         save: r.candidateSavePath,
-        audit: r.audit,
+        verify: r.verify,
         error: r.error ?? null,
       })),
     });
@@ -421,25 +421,25 @@ async function promoteStagedModules({ config, authored, log, epochId }) {
     const moduleDest = resolve(config.libDir, "modules", `${a.id}.yaml`);
     const blueprintDest = resolve(config.libDir, "blueprints", `${a.id}.json`);
     await copyFile(a.jsonPath, blueprintDest);
-    const promotedAudits = [];
-    for (const sa of (a.stagedAudits || [])) {
-      const auditDest = resolve(config.libDir, "audits", sa.basename);
-      await copyFile(sa.stagedPath, auditDest);
-      promotedAudits.push({ ...sa, libRel: `lib/audits/${sa.basename}` });
-      log(`[epoch ${epochId}] promoted audit '${sa.auditId}' → ${auditDest}`);
+    const promotedMeters = [];
+    for (const sm of (a.stagedMeters || [])) {
+      const meterDest = resolve(config.libDir, "meters", sm.basename);
+      await copyFile(sm.stagedPath, meterDest);
+      promotedMeters.push({ ...sm, libRel: `lib/meters/${sm.basename}` });
+      log(`[epoch ${epochId}] promoted meter '${sm.meterId}' → ${meterDest}`);
     }
-    // Rewrite the yaml's audits[].script entries that pointed at staged-modules/
+    // Rewrite the yaml's meters[].script entries that pointed at staged-modules/
     // so the promoted module yaml references the lib path. Without this, the
     // next epoch's lib-load would point at a non-existent staged-modules/ dir.
     let yamlText = await readFile(a.yamlPath, "utf8");
-    if (promotedAudits.length > 0) {
+    if (promotedMeters.length > 0) {
       const parsed = parseYaml(yamlText);
-      for (const audit of (parsed.audits || [])) {
-        if (typeof audit.script !== "string") continue;
-        if (!audit.script.startsWith("staged-modules/")) continue;
-        const base = audit.script.slice("staged-modules/".length);
-        const pa = promotedAudits.find((p) => p.basename === base);
-        if (pa) audit.script = pa.libRel;
+      for (const meter of (parsed.meters || [])) {
+        if (typeof meter.script !== "string") continue;
+        if (!meter.script.startsWith("staged-modules/")) continue;
+        const base = meter.script.slice("staged-modules/".length);
+        const pm = promotedMeters.find((p) => p.basename === base);
+        if (pm) meter.script = pm.libRel;
       }
       yamlText = stringifyYaml(parsed);
     }
@@ -455,7 +455,7 @@ async function readJsonOrNull(path) {
 
 // Aggregate pi-trace.json files across the run into a single, summary-friendly
 // object and persist as <runDir>/run-meta.json. Tolerant of missing trace
-// files (e.g. probe cache hit before pi-trace was added; pre-audit attempt
+// files (e.g. probe cache hit before pi-trace was added; pre-observe attempt
 // failures where design dir might be empty).
 async function writeRunMeta({
   runDir, epoch, ok, inputSave, outputSave,
@@ -501,7 +501,7 @@ async function writeRunMeta({
       design: designBlock,
       dry_validate: r.dry_validate,
       execute: r.execute,
-      audit: r.audit,
+      verify: r.verify,
       observe: r.observe ?? null,
       error: r.error,
     });
@@ -576,7 +576,7 @@ async function writeDigest({ config, epoch, verdict, runDir }) {
 // ---------------------------------------------------------------------------
 // Parallel composition epoch — N independent designs evaluated simultaneously.
 // Design phases run in parallel (LLM-only, no Factorio interaction).
-// Execute+audit phases run concurrently on an N-slot InstancePool.
+// Verify + execute + observe phases run concurrently on an N-slot InstancePool.
 // ---------------------------------------------------------------------------
 
 async function runOneDesign(idx, { config, epoch, probeResult, runDir, log }) {
@@ -628,7 +628,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
     authored: designResult?.authored?.map((a) => a.id) ?? [],
     dry_validate: design.dryResult ? { ok: design.dryResult.ok, errors: design.dryResult.errors ?? [] } : null,
     execute: null,
-    audit: null,
+    verify: null,
     observe: null,
     error: designError,
   };
@@ -646,7 +646,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
       stateYamlPath: probeResult?.stateYamlPath,
     });
     const verdict = verifyResult.verdict;
-    record.audit = {
+    record.verify = {
       pass: verdict.pass,
       measured: verdict.measured,
       threshold: verdict.threshold,
@@ -676,7 +676,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
 
       // Observe: measure the clean save without harness
       log(`[epoch ${epoch.id}] [${cid}] observe`);
-      const observeVerdict = await runAudit({
+      const observeVerdict = await runObserve({
         controller: slot.controller,
         targetMetric: epoch.target_metric,
         successCriteria: epoch.success_criteria,
@@ -709,7 +709,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   const controller = new FactorioController(factorio, config);
   const inputSave = resolveInputSave(config, epoch.input_save);
   const n = config.parallelCandidates;
-  log(`[epoch ${epoch.id}] parallel mode: ${n} candidates, benchmark audit`);
+  log(`[epoch ${epoch.id}] parallel mode: ${n} candidates`);
 
   const runTs = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
@@ -745,7 +745,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
 
   let attemptRecords;
   try {
-    // Parallel execute + benchmark audit.
+    // Parallel verify + execute + observe.
     log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
     attemptRecords = await Promise.all(
       designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult, inputSave })),
@@ -755,7 +755,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   }
 
   const selection = pickWinner(attemptRecords, epoch.optimize);
-  const winningRecord = attemptRecords.find((r) => r.audit?.pass);
+  const winningRecord = attemptRecords.find((r) => r.verify?.pass);
 
   const historyEntries = designs.map((d) => ({
     attempt: d.idx + 1,
@@ -783,7 +783,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
     }
 
     const winVerdict = (() => {
-      const r = winningRecord.audit;
+      const r = winningRecord.verify;
       return r ? { pass: r.pass, item: r.item, measured: r.measured, threshold: r.threshold,
         window_ticks_actual: r.window_ticks_actual ?? null, timestamp: new Date().toISOString() } : null;
     })();
@@ -801,7 +801,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
       candidates: attemptRecords.map((r) => ({
         candidate: r.candidate,
         save: r.candidateSavePath,
-        audit: r.audit,
+        verify: r.verify,
         error: r.error ?? null,
       })),
     });
@@ -818,7 +818,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
     actualAttempts: n,
     probeCacheHit: !!probeResult.cacheHit,
     attemptRecords,
-    lastVerdict: winningRecord?.audit ?? null,
+    lastVerdict: winningRecord?.verify ?? null,
   });
 
   try {
@@ -830,7 +830,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
 
   return {
     ok: !!winningRecord,
-    verdict: winningRecord?.audit ?? null,
+    verdict: winningRecord?.verify ?? null,
     runDir,
     attempts: n,
     attemptsDetail: attemptRecords,

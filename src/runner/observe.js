@@ -1,14 +1,14 @@
-// audit.js — deterministic verdict generator. Reads the audit script
-// referenced by the epoch's target_metric, runs it via RCON before and
-// after a tick window, derives `measured` per the module's aggregate
-// strategy, then evaluates each `epoch.success_criteria` entry against
-// the world.
+// observe.js — deterministic verdict generator (the observe phase). Reads
+// the meter script referenced by the epoch's target_metric, runs it via
+// RCON before and after a tick window on the clean post-execute world,
+// derives `measured` per the module's aggregate strategy, then evaluates
+// each `epoch.success_criteria` entry against the world.
 //
-// Critical invariant: this module never invokes `pi`. Auditor must be
+// Critical invariant: this module never invokes `pi`. Observe must be
 // deterministic so the multi-branch and multi-run comparisons are valid.
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { resolveAudit } from "./audit-resolver.js";
+import { resolveMeter } from "./meter-resolver.js";
 import {
   evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
 } from "./success-criteria.js";
@@ -18,7 +18,7 @@ const TICKS_PER_SECOND = 60;
 function readMeasured(snapshot) {
   if (typeof snapshot.measured === "number") return snapshot.measured;
   if (typeof snapshot.cumulative_produced === "number") return snapshot.cumulative_produced;
-  throw new Error("audit script must return numeric `measured` (or legacy `cumulative_produced`)");
+  throw new Error("meter script must return numeric `measured` (or legacy `cumulative_produced`)");
 }
 
 // Same `ok === false` semantics that the old in-file rconRunScript enforced:
@@ -29,14 +29,14 @@ function assertSnapshotUsable(snap) {
   if (snap && snap.ok === false
       && typeof snap.measured !== "number"
       && typeof snap.cumulative_produced !== "number") {
-    throw new Error(`audit script failed: ${snap.error || "unknown"}`);
+    throw new Error(`meter script failed: ${snap.error || "unknown"}`);
   }
 }
 
 /**
  * @param {object} args
  * @param {object} args.controller     — FactorioController (rcon + advanceTicks + runLuaScript + countEntities)
- * @param {object} args.targetMetric   — see audit-resolver.js for the 3 supported shapes
+ * @param {object} args.targetMetric   — see meter-resolver.js for the 3 supported shapes
  * @param {Array<object>} [args.successCriteria] — epoch.success_criteria; if absent,
  *        a legacy `target_metric.threshold` is auto-converted to a single
  *        threshold criterion. If neither is present we fall back to a
@@ -44,17 +44,17 @@ function assertSnapshotUsable(snap) {
  * @param {string} args.outDir         — plans/<run>/ directory; observe.json is written here
  * @param {Map<string, object>} [args.modules]  — module map (lib + staged); required for module-driven shapes
  * @param {object} [args.plan]         — plan.yaml object; required for goal-only metric shape
- * @param {string} [args.stagedDir]    — candidate's staged-modules/ for resolving in-flight audit lua
+ * @param {string} [args.stagedDir]    — candidate's staged-modules/ for resolving in-flight meter lua
  * @returns {Promise<object>}
  */
-export async function runAudit({
+export async function runObserve({
   controller, targetMetric, outDir, modules, plan, stagedDir, successCriteria,
 }) {
-  const resolved = resolveAudit({
+  const resolved = resolveMeter({
     targetMetric, modules, plan, stagedDir,
     rootDir: controller.config.rootDir,
   });
-  const { scriptPath, params, aggregate, metric, item, moduleId, auditId } = resolved;
+  const { scriptPath, params, aggregate, metric, item, moduleId, meterId } = resolved;
   const windowTicks = params.window_ticks ?? 3600;
 
   const criteria = (successCriteria && successCriteria.length > 0)
@@ -64,7 +64,7 @@ export async function runAudit({
         : [{ kind: "nonzero", metric }]);
   validateCriteria(criteria);
 
-  const auditStart = Date.now();
+  const observeStart = Date.now();
   let before = null, after;
   if (aggregate === "snapshot_post") {
     await controller.advanceTicks(windowTicks);
@@ -77,7 +77,7 @@ export async function runAudit({
     after = await controller.runLuaScript(scriptPath, params);
     assertSnapshotUsable(after);
   }
-  const wall_clock_ms = Date.now() - auditStart;
+  const wall_clock_ms = Date.now() - observeStart;
   const entity_count = await controller.countEntities().catch(() => null);
 
   const tickDelta = before ? (after.tick - before.tick) : windowTicks;
@@ -99,7 +99,7 @@ export async function runAudit({
     measured,
     metric,
     snapshot: after || null,
-    executeOk: true, // we only reach audit if execute didn't throw
+    executeOk: true, // we only reach observe if execute didn't throw
     countEntities: (name) => controller.countEntitiesByName({ name }),
   };
   const { pass, results: criteriaResults } = await evaluateCriteria(criteria, ctx);
@@ -125,9 +125,9 @@ export async function runAudit({
     entity_count,
     before,
     after,
-    audit_script: resolved.scriptRel,
+    meter_script: resolved.scriptRel,
     module_id: moduleId,
-    audit_id: auditId,
+    meter_id: meterId,
     timestamp: new Date().toISOString(),
   };
   await mkdir(dirname(resolve(outDir, "observe.json")), { recursive: true });

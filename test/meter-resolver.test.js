@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveAudit } from "../src/runner/audit-resolver.js";
+import { resolveMeter } from "../src/runner/meter-resolver.js";
 
 const ROOT = "/root";
 const STAGED = "/staged";
@@ -9,9 +9,9 @@ function makeModules() {
   return new Map([
     ["coal-burner-cell", {
       id: "coal-burner-cell",
-      audits: [{
+      meters: [{
         id: "cbc-throughput",
-        script: "lib/audits/throughput-window.lua",
+        script: "lib/meters/throughput-window.lua",
         metric: "coal_per_s",
         aggregate: "rate_from_cumulative",
         params: { item: "coal", window_ticks: 3600 },
@@ -20,9 +20,9 @@ function makeModules() {
     ["steam-power-line", {
       id: "steam-power-line",
       _staged: true,
-      audits: [{
+      meters: [{
         id: "spl-power",
-        script: "staged-modules/steam-power-line-audit.lua",
+        script: "staged-modules/steam-power-line-meter.lua",
         metric: "power_kw",
         aggregate: "snapshot_post",
         params: { window_ticks: 3600 },
@@ -31,15 +31,15 @@ function makeModules() {
   ]);
 }
 
-test("legacy shape: target_metric.audit + min_rate_per_s threshold", () => {
-  const r = resolveAudit({
+test("legacy shape: target_metric.meter + min_rate_per_s threshold", () => {
+  const r = resolveMeter({
     targetMetric: {
-      audit: "lib/audits/throughput-window.lua",
+      meter: "lib/meters/throughput-window.lua",
       params: { item: "coal", min_rate_per_s: 0.1, window_ticks: 3600 },
     },
     rootDir: ROOT,
   });
-  assert.equal(r.scriptPath, "/root/lib/audits/throughput-window.lua");
+  assert.equal(r.scriptPath, "/root/lib/meters/throughput-window.lua");
   assert.equal(r.aggregate, "rate_from_cumulative");
   assert.equal(r.threshold, 0.1);
   assert.equal(r.item, "coal");
@@ -47,47 +47,47 @@ test("legacy shape: target_metric.audit + min_rate_per_s threshold", () => {
   assert.equal(r.moduleId, null);
 });
 
-test("module shape: pulls audit from module, merges params, uses explicit threshold", () => {
-  const r = resolveAudit({
+test("module shape: pulls meter from module, merges params, uses explicit threshold", () => {
+  const r = resolveMeter({
     targetMetric: { module: "coal-burner-cell", threshold: 0.3, params: { window_ticks: 1800 } },
     modules: makeModules(),
     rootDir: ROOT,
   });
-  assert.equal(r.scriptPath, "/root/lib/audits/throughput-window.lua");
+  assert.equal(r.scriptPath, "/root/lib/meters/throughput-window.lua");
   assert.equal(r.threshold, 0.3);
   assert.equal(r.params.window_ticks, 1800);
   assert.equal(r.params.item, "coal");
   assert.equal(r.moduleId, "coal-burner-cell");
-  assert.equal(r.auditId, "cbc-throughput");
+  assert.equal(r.meterId, "cbc-throughput");
   assert.equal(r.metric, "coal_per_s");
 });
 
-test("module shape with audit_id picks named audit", () => {
+test("module shape with meter_id picks named meter", () => {
   const modules = new Map([["m", {
     id: "m",
-    audits: [
-      { id: "a1", script: "lib/audits/x.lua", metric: "foo" },
-      { id: "a2", script: "lib/audits/y.lua", metric: "bar" },
+    meters: [
+      { id: "a1", script: "lib/meters/x.lua", metric: "foo" },
+      { id: "a2", script: "lib/meters/y.lua", metric: "bar" },
     ],
   }]]);
-  const r = resolveAudit({
-    targetMetric: { module: "m", audit_id: "a2", threshold: 1 },
+  const r = resolveMeter({
+    targetMetric: { module: "m", meter_id: "a2", threshold: 1 },
     modules,
     rootDir: ROOT,
   });
-  assert.equal(r.auditId, "a2");
-  assert.equal(r.scriptPath, "/root/lib/audits/y.lua");
+  assert.equal(r.meterId, "a2");
+  assert.equal(r.scriptPath, "/root/lib/meters/y.lua");
 });
 
 test("goal-only shape: finds module by metric, resolves staged path", () => {
-  const r = resolveAudit({
+  const r = resolveMeter({
     targetMetric: { metric: "power_kw", threshold: 100, params: { window_ticks: 3600 } },
     modules: makeModules(),
     plan: { placements: [{ id: "p0", module: "steam-power-line" }] },
     rootDir: ROOT,
     stagedDir: STAGED,
   });
-  assert.equal(r.scriptPath, "/staged/steam-power-line-audit.lua");
+  assert.equal(r.scriptPath, "/staged/steam-power-line-meter.lua");
   assert.equal(r.aggregate, "snapshot_post");
   assert.equal(r.threshold, 100);
   assert.equal(r.metric, "power_kw");
@@ -96,23 +96,23 @@ test("goal-only shape: finds module by metric, resolves staged path", () => {
 
 test("goal-only shape: errors when no placed module matches metric", () => {
   assert.throws(
-    () => resolveAudit({
+    () => resolveMeter({
       targetMetric: { metric: "no_such" },
       modules: makeModules(),
       plan: { placements: [{ id: "p0", module: "steam-power-line" }] },
       rootDir: ROOT,
     }),
-    /no placed module declares an audit/,
+    /no placed module declares a meter/,
   );
 });
 
 test("goal-only shape: errors when multiple placed modules match metric", () => {
   const modules = new Map([
-    ["a", { id: "a", audits: [{ id: "ax", script: "lib/audits/x.lua", metric: "shared" }] }],
-    ["b", { id: "b", audits: [{ id: "bx", script: "lib/audits/y.lua", metric: "shared" }] }],
+    ["a", { id: "a", meters: [{ id: "ax", script: "lib/meters/x.lua", metric: "shared" }] }],
+    ["b", { id: "b", meters: [{ id: "bx", script: "lib/meters/y.lua", metric: "shared" }] }],
   ]);
   assert.throws(
-    () => resolveAudit({
+    () => resolveMeter({
       targetMetric: { metric: "shared" },
       modules,
       plan: { placements: [{ id: "p0", module: "a" }, { id: "p1", module: "b" }] },
@@ -124,7 +124,7 @@ test("goal-only shape: errors when multiple placed modules match metric", () => 
 
 test("staged path requires stagedDir", () => {
   assert.throws(
-    () => resolveAudit({
+    () => resolveMeter({
       targetMetric: { metric: "power_kw" },
       modules: makeModules(),
       plan: { placements: [{ id: "p0", module: "steam-power-line" }] },
@@ -136,15 +136,15 @@ test("staged path requires stagedDir", () => {
 });
 
 test("missing target_metric throws", () => {
-  assert.throws(() => resolveAudit({ rootDir: ROOT }), /target_metric/);
+  assert.throws(() => resolveMeter({ rootDir: ROOT }), /target_metric/);
 });
 
-test("schema validates audits[] in lib-loader", async () => {
+test("schema validates meters[] in lib-loader", async () => {
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { loadAllModules } = await import("../src/lib-loader.js");
-  const root = await mkdtemp(join(tmpdir(), "foundry-audits-test-"));
+  const root = await mkdtemp(join(tmpdir(), "foundry-meters-test-"));
   await mkdir(join(root, "modules"), { recursive: true });
   await writeFile(join(root, "modules", "m.yaml"), `
 id: m
@@ -154,24 +154,24 @@ outputs:
   - { name: out, rel_pos: [1, 0], throughput: 1.0, item: coal, kind: belt }
 footprint: { min: [-1, -1], max: [2, 1] }
 realization: { blueprint: lib/blueprints/foo.json }
-audits:
+meters:
   - id: a1
-    script: lib/audits/x.lua
+    script: lib/meters/x.lua
     metric: power_kw
     aggregate: snapshot_post
     params: { window_ticks: 3600 }
 `);
   const mods = await loadAllModules(root);
-  assert.equal(mods.get("m").audits[0].metric, "power_kw");
+  assert.equal(mods.get("m").meters[0].metric, "power_kw");
   await rm(root, { recursive: true, force: true });
 });
 
-test("schema rejects audits with bad aggregate", async () => {
+test("schema rejects meters with bad aggregate", async () => {
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { loadAllModules } = await import("../src/lib-loader.js");
-  const root = await mkdtemp(join(tmpdir(), "foundry-audits-bad-"));
+  const root = await mkdtemp(join(tmpdir(), "foundry-meters-bad-"));
   await mkdir(join(root, "modules"), { recursive: true });
   await writeFile(join(root, "modules", "m.yaml"), `
 id: m
@@ -180,9 +180,9 @@ inputs: []
 outputs: []
 footprint: { min: [0,0], max: [1,1] }
 realization: { blueprint: x }
-audits:
+meters:
   - id: a1
-    script: lib/audits/x.lua
+    script: lib/meters/x.lua
     aggregate: bogus_strategy
 `);
   await assert.rejects(() => loadAllModules(root), /aggregate invalid/);

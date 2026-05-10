@@ -7,9 +7,9 @@ goal: |
   Attempt 1 emits a plan whose belt connection cannot route (the goal port
   is 2000 tiles away; A* exhausts maxIterations). Execute writes
   proposal.json, epoch.js injects executor_proposal into designer-history.
-  Attempt 2 emits a clean coal-burner-cell-only plan that audits pass.
+  Attempt 2 emits a clean coal-burner-cell-only plan that verify passes.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.10

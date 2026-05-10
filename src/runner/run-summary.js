@@ -64,8 +64,9 @@ async function scanRunDir(runDir) {
     attempts.push(await scanAttempt(runDir, 1, totals));
   }
 
-  const lastAudit = [...attempts].reverse().find((a) => a.audit)?.audit ?? null;
-  const winningAttempt = attempts.find((a) => a.audit?.pass);
+  const lastVerdict = [...attempts].reverse().find((a) => a.verify ?? a.observe)?.verify
+    ?? [...attempts].reverse().find((a) => a.observe)?.observe ?? null;
+  const winningAttempt = attempts.find((a) => (a.verify ?? a.observe)?.pass);
 
   return {
     epoch: null,                          // unknown without run-meta
@@ -76,22 +77,23 @@ async function scanRunDir(runDir) {
     actual_attempts: attempts.length,
     probe,
     attempts,
-    final_verdict: lastAudit ? {
-      pass: lastAudit.pass,
-      item: lastAudit.item,
-      measured: lastAudit.measured,
-      threshold: lastAudit.threshold,
+    final_verdict: lastVerdict ? {
+      pass: lastVerdict.pass,
+      item: lastVerdict.item,
+      measured: lastVerdict.measured,
+      threshold: lastVerdict.threshold,
     } : null,
     totals,
   };
 }
 
 async function scanAttempt(attemptDir, attemptNum, totals) {
-  // observe.json (was audit.json) — written by audit.js from the observe
-  // phase, on the clean post-execute world. The verdict shape is the audit
-  // verdict; we keep the field name `audit` here to match run-meta.json's
-  // legacy projection.
-  const audit = await readJsonOrNull(join(attemptDir, "observe.json"));
+  // observe.json is written by observe.js on the clean post-execute world.
+  // When run-meta.json is missing we synthesize the meta from what's on disk;
+  // observe.json is the only verdict file present, so populate the `observe`
+  // block. The `verify` block (which would come from verify.json under
+  // execute/) is left null in this fallback path.
+  const observe = await readJsonOrNull(join(attemptDir, "observe.json"));
   const dry = await readJsonOrNull(join(attemptDir, "dry-validate.json"));
   const exec = await readJsonOrNull(join(attemptDir, "execute", "execute.json"));
   const designTrace = await readJsonOrNull(join(attemptDir, "design", "pi-trace.json"));
@@ -117,13 +119,14 @@ async function scanAttempt(attemptDir, attemptNum, totals) {
     },
     dry_validate: dry ? { ok: dry.ok, errors: dry.errors ?? [] } : null,
     execute: exec ? { ok: exec.ok, save_path: null } : null,
-    audit: audit ? {
-      pass: audit.pass,
-      measured: audit.measured,
-      threshold: audit.threshold,
-      item: audit.item,
-      seconds_actual: audit.seconds_actual,
-      produced_delta: audit.produced_delta,
+    verify: null,
+    observe: observe ? {
+      pass: observe.pass,
+      measured: observe.measured,
+      threshold: observe.threshold,
+      item: observe.item,
+      seconds_actual: observe.seconds_actual,
+      produced_delta: observe.produced_delta,
     } : null,
     error: null,
   };
@@ -156,16 +159,17 @@ function fmtNumber(n, digits = 4) {
 
 function statusBadge(ok, hasVerdict) {
   if (ok) return "✅ pass";
-  if (!hasVerdict) return "⚠ no audit";
+  if (!hasVerdict) return "⚠ no verdict";
   return "❌ fail";
 }
 
 function trajectoryLine(attempts) {
   if (attempts.length === 0) return null;
   const placements = attempts.map((a) => a.design.placements ?? "?").join(" → ");
-  const measured = attempts.map((a) => a.audit ? a.audit.measured.toFixed(2) : "—").join(" → ");
+  const verdictOf = (a) => a.verify ?? a.observe;
+  const measured = attempts.map((a) => verdictOf(a) ? verdictOf(a).measured.toFixed(2) : "—").join(" → ");
   const final = attempts[attempts.length - 1];
-  const verdict = final.audit?.pass ? "converged" : "all failed";
+  const verdict = verdictOf(final)?.pass ? "converged" : "all failed";
   return `${attempts.length} attempts: placements ${placements}; measured ${measured}. (${verdict})`;
 }
 
@@ -193,9 +197,10 @@ function renderMarkdown(meta) {
     lines.push("| # | placements | authored | dry-validate | measured | pass | tokens | $ | wall |");
     lines.push("|---|---|---|---|---|---|---|---|---|");
     for (const a of meta.attempts) {
+      const v = a.verify ?? a.observe;
       const dryCell = a.dry_validate ? (a.dry_validate.ok ? "ok" : `fail: ${a.dry_validate.errors.join("; ").slice(0, 40)}`) : "—";
-      const measuredCell = a.audit ? `${fmtNumber(a.audit.measured)} / ${fmtNumber(a.audit.threshold)}` : (a.error ? `pre-audit fail` : "—");
-      const passCell = a.audit ? (a.audit.pass ? "✅" : "❌") : (a.error ? "💥" : "—");
+      const measuredCell = v ? `${fmtNumber(v.measured)} / ${fmtNumber(v.threshold)}` : (a.error ? `pre-verify fail` : "—");
+      const passCell = v ? (v.pass ? "✅" : "❌") : (a.error ? "💥" : "—");
       const authoredCell = a.design.authored?.length ? a.design.authored.join(", ") : "—";
       lines.push([
         "",

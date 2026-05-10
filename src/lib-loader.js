@@ -59,47 +59,47 @@ function validateModule(module, file) {
     }
   }
 
-  // audits[] is optional but, if present, each entry must have id and
+  // meters[] is optional but, if present, each entry must have id and
   // EXACTLY ONE of {script, port}. The `port` form routes to the unified
   // port-meter (lib/meters/port-meter.lua) and references a port declared
   // in inputs/outputs by name. The `script` form is the legacy direct
   // path; metric and aggregate are optional (rate_from_cumulative is the
   // default for legacy throughput-window.lua-style scripts).
-  if (module.audits !== undefined) {
-    if (!Array.isArray(module.audits)) {
-      errors.push("audits must be an array");
+  if (module.meters !== undefined) {
+    if (!Array.isArray(module.meters)) {
+      errors.push("meters must be an array");
     } else {
       const portIndex = new Map();
       for (const port of [...(module.inputs || []), ...(module.outputs || [])]) {
         if (port && typeof port.name === "string") portIndex.set(port.name, port);
       }
       const seenIds = new Set();
-      for (const [i, a] of module.audits.entries()) {
-        if (!a || typeof a !== "object") { errors.push(`audits[${i}] must be an object`); continue; }
-        if (typeof a.id !== "string" || !a.id) errors.push(`audits[${i}].id must be a non-empty string`);
-        else if (seenIds.has(a.id)) errors.push(`audits[${i}].id duplicate: ${a.id}`);
-        else seenIds.add(a.id);
-        const hasScript = typeof a.script === "string" && a.script.length > 0;
-        const hasPort = typeof a.port === "string" && a.port.length > 0;
+      for (const [i, m] of module.meters.entries()) {
+        if (!m || typeof m !== "object") { errors.push(`meters[${i}] must be an object`); continue; }
+        if (typeof m.id !== "string" || !m.id) errors.push(`meters[${i}].id must be a non-empty string`);
+        else if (seenIds.has(m.id)) errors.push(`meters[${i}].id duplicate: ${m.id}`);
+        else seenIds.add(m.id);
+        const hasScript = typeof m.script === "string" && m.script.length > 0;
+        const hasPort = typeof m.port === "string" && m.port.length > 0;
         if (hasScript && hasPort) {
-          errors.push(`audits[${i}] must declare either 'script' or 'port', not both`);
+          errors.push(`meters[${i}] must declare either 'script' or 'port', not both`);
         } else if (!hasScript && !hasPort) {
-          errors.push(`audits[${i}] must declare one of 'script' or 'port'`);
+          errors.push(`meters[${i}] must declare one of 'script' or 'port'`);
         }
         if (hasPort) {
-          const refPort = portIndex.get(a.port);
+          const refPort = portIndex.get(m.port);
           if (!refPort) {
-            errors.push(`audits[${i}].port '${a.port}' does not match any inputs[]/outputs[].name`);
+            errors.push(`meters[${i}].port '${m.port}' does not match any inputs[]/outputs[].name`);
           } else if (!METERED_KINDS.has(refPort.kind)) {
-            errors.push(`audits[${i}].port '${a.port}' has kind '${refPort.kind}' — port-meter only supports ${[...METERED_KINDS].join(", ")}`);
+            errors.push(`meters[${i}].port '${m.port}' has kind '${refPort.kind}' — port-meter only supports ${[...METERED_KINDS].join(", ")}`);
           }
         }
-        if (a.metric !== undefined && typeof a.metric !== "string") errors.push(`audits[${i}].metric must be a string`);
-        if (a.aggregate !== undefined && !AGGREGATE_VALUES.has(a.aggregate)) {
-          errors.push(`audits[${i}].aggregate invalid: ${a.aggregate} (allowed: ${[...AGGREGATE_VALUES].join(",")})`);
+        if (m.metric !== undefined && typeof m.metric !== "string") errors.push(`meters[${i}].metric must be a string`);
+        if (m.aggregate !== undefined && !AGGREGATE_VALUES.has(m.aggregate)) {
+          errors.push(`meters[${i}].aggregate invalid: ${m.aggregate} (allowed: ${[...AGGREGATE_VALUES].join(",")})`);
         }
-        if (a.params !== undefined && (typeof a.params !== "object" || Array.isArray(a.params))) {
-          errors.push(`audits[${i}].params must be an object`);
+        if (m.params !== undefined && (typeof m.params !== "object" || Array.isArray(m.params))) {
+          errors.push(`meters[${i}].params must be an object`);
         }
       }
     }
@@ -222,7 +222,7 @@ export async function loadAllModules(libDir) {
  * blueprint lookup.
  *
  * Used by epochs with `allow_module_creation: true` to expose newly-authored
- * modules to dry-validate / execute / audit before they're promoted to lib/.
+ * modules to dry-validate / verify / execute / observe before they're promoted to lib/.
  *
  * @param {string} libDir
  * @param {string|null|undefined} stagedDir — optional dir holding .yaml + .json pairs

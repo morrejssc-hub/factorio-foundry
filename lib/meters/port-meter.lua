@@ -1,9 +1,9 @@
 -- port-meter.lua
 --
--- Unified port-attached meter. Replaces per-module audit scripts.
+-- Unified port-attached meter. Replaces per-module meter scripts.
 -- Branches on `port_kind` and reads from the corresponding Factorio
 -- statistic. Returns the same {ok, tick, cumulative_produced} shape
--- that the Node-side runner already understands (audit.js readMeasured),
+-- that the Node-side runner already understands (observe.js readMeasured),
 -- so before/after delta logic is shared with throughput-window.lua.
 --
 -- params:

@@ -16,7 +16,7 @@ import {
   routeConnections,
 } from "./execute.js";
 import { runDryValidate } from "./dry-validate.js";
-import { resolveAudit } from "./audit-resolver.js";
+import { resolveMeter } from "./meter-resolver.js";
 import {
   evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
 } from "./success-criteria.js";
@@ -29,7 +29,7 @@ function readMeasured(snapshot) {
   throw new Error(`meter script must return numeric measured (or legacy cumulative_produced)`);
 }
 
-// Same `ok === false` semantics as audit.js: tolerate scripts that conflate
+// Same `ok === false` semantics as observe.js: tolerate scripts that conflate
 // ok with "passes threshold" so long as they still return a usable measured.
 function assertSnapshotUsable(snap) {
   if (snap && snap.ok === false
@@ -154,15 +154,15 @@ export async function runVerify({
     await controller.action("power_harness_setup", { placements: powerHarnessManifest });
   }
 
-  // Step 5: resolve audit/meter configuration
-  const resolved = resolveAudit({
+  // Step 5: resolve meter configuration
+  const resolved = resolveMeter({
     targetMetric: epoch.target_metric,
     modules,
     plan,
     stagedDir: outDir.replace(/\/execute$/, "") + "/staged-modules",
     rootDir: controller.config.rootDir,
   });
-  const { scriptPath, params, aggregate, metric, item, moduleId, auditId } = resolved;
+  const { scriptPath, params, aggregate, metric, item, moduleId, meterId } = resolved;
   const windowTicks = params.window_ticks ?? 3600;
 
   // Resolve success criteria
@@ -175,7 +175,7 @@ export async function runVerify({
   validateCriteria(criteria);
 
   // Step 6: run meter window with harness ticker. advanceTicks drives the
-  // simulation forward sim-tick by sim-tick (matches audit.js semantics);
+  // simulation forward sim-tick by sim-tick (matches observe.js semantics);
   // chunking lets the harness ticker fire every 600 ticks (10s game-time).
   const verifyStart = Date.now();
   let ticksElapsed = 0;
@@ -258,9 +258,9 @@ export async function runVerify({
     entity_count,
     before,
     after,
-    audit_script: resolved.scriptRel,
+    meter_script: resolved.scriptRel,
     module_id: moduleId,
-    audit_id: auditId,
+    meter_id: meterId,
     timestamp: new Date().toISOString(),
   };
 
@@ -271,9 +271,8 @@ export async function runVerify({
     await controller.action("harness_teardown");
   }
 
-  // Write verify.json (was audit.json — observe writes its own observe.json
-  // alongside, so split names avoid the same-filename collision in the
-  // candidate dir).
+  // Write verify.json (observe writes its own observe.json alongside, so split
+  // names avoid the same-filename collision in the candidate dir).
   await mkdir(dirname(resolve(outDir, "verify.json")), { recursive: true });
   await writeFile(resolve(outDir, "verify.json"), JSON.stringify(verdict, null, 2), "utf8");
 

@@ -31,7 +31,7 @@ realization:
   starter_fuel:
     - { item: coal, count: 5 }   # bootstrap before self-feed cycle stabilises
 
-audits:
+meters:
   - id: coal-burner-cell-throughput
-    script: lib/audits/throughput-window.lua
+    script: lib/meters/throughput-window.lua
     params: { item: coal, min_rate_per_s: 0.1, window_ticks: 3600 }

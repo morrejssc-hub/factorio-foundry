@@ -2,14 +2,14 @@ id: e6-recovery-test
 kind: composition
 depends_on: [e0-bootstrap]
 input_save: state/saves/e0-bootstrap-v1.zip
-recovery_attempts: 3   # NEW: Retry design+execute+audit up to 3 times before
+recovery_attempts: 3   # NEW: Retry design+verify+execute up to 3 times before
                        # giving up. Default 1 means no recovery (preserves
                        # behaviour for e1-e5). probe runs once regardless,
                        # cached across attempts via state/cache/probe/.
 goal: |
   Stress-test the recovery loop with an INTENTIONALLY-UNREACHABLE threshold.
   The single coal-burner-cell module delivers ~0.25 coal/s; we ask for ≥ 0.95
-  coal/s, so every attempt's audit will fail. The expected outcome is
+  coal/s, so every attempt's verify will fail. The expected outcome is
   ok=false after 3 attempts, with each retry's design seeing the previous
   attempt's verdict in its user message. This validates:
 
@@ -24,7 +24,7 @@ goal: |
 
   This is an orphan branch; nothing depends on its (non-)output_save.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.95   # unreachable for a single coal-burner-cell

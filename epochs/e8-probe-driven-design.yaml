@@ -14,14 +14,14 @@ goal: |
         patch area and find clear tiles for the module footprint.
     (b) Use factorio_read with lib/probes/validate-placement.lua to confirm
         the chosen anchor before writing plan.yaml.
-    (c) Write plan.yaml with a coal-burner-cell placement that passes audit.
+    (c) Write plan.yaml with a coal-burner-cell placement that passes verify.
 
   This validates that the foundry-read pi extension wires correctly into the
   design phase and that the Designer can reason from live game queries rather
   than pre-digested summaries.
 
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.1

@@ -40,7 +40,7 @@ realization:
   starter_fuel:
     - { item: coal, count: 30 }   # drill:10 furnace:5 output_inserter:5 fuel_inserters:5+5
 
-audits:
+meters:
   - id: iron-smelt-line-throughput
-    script: lib/audits/throughput-window.lua
+    script: lib/meters/throughput-window.lua
     params: { item: iron-plate, min_rate_per_s: 0.05, window_ticks: 3600 }

@@ -19,7 +19,7 @@ goal: |
   from raw ore to science packs.
 allow_module_creation: true
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: automation-science-pack
     min_rate_per_s: 0.02

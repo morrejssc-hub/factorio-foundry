@@ -29,7 +29,7 @@ realization:
   starter_fuel:
     - { item: coal, count: 20 }   # 10 drill + 5 furnace + 5 inserter; pre-loaded by blueprint fuel[]
 
-audits:
+meters:
   - id: copper-smelt-line-throughput
-    script: lib/audits/throughput-window.lua
+    script: lib/meters/throughput-window.lua
     params: { item: copper-plate, min_rate_per_s: 0.05, window_ticks: 3600 }

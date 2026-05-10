@@ -18,7 +18,7 @@ goal: |
 
   This is an orphan branch in the DAG: no downstream epoch depends on
   e5's output_save. The durable artefact is the promoted module file in
-  lib/ (on audit pass), not the world state. Subsequent epochs that need
+  lib/ (on verify pass), not the world state. Subsequent epochs that need
   coal-cluster-cell will branch from a state-chain save (e0-e4) and use
   the new module from lib/ directly.
 
@@ -32,7 +32,7 @@ goal: |
   degenerate single-drill solution but accepts a 2-drill merged design
   with reasonable belt-stall margin.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.40

@@ -11,7 +11,7 @@ goal: |
   → craft 1 burner-mining-drill → re-call execute_blueprint. Audit pass
   means the repair path produced a fully-working cell.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: coal
     min_rate_per_s: 0.10

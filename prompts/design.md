@@ -40,7 +40,7 @@ Do NOT call `factorio_action` — any mutation attempt is a violation.
   read these to understand the entity layout and starter fuel requirements.
 - `staged-modules/` — present (writable) only when `epoch.allow_module_creation`
   is true. New module yaml + blueprint json go here, NOT directly into lib/.
-  The runner promotes them to lib/ on audit pass.
+  The runner promotes them to lib/ on verify pass.
 
 ## Output is schema-validated. Read this carefully.
 
@@ -66,7 +66,7 @@ epoch** if any are missing. Each placement is also schema-checked.
 
 **You are NOT writing a project plan, a runbook, or a step list.** You are
 emitting a placement specification. The runner already knows how to walk,
-place blueprints, seed fuel, wait, and audit — those are not your concern.
+place blueprints, seed fuel, wait, verify, and observe — those are not your concern.
 
 **Anti-patterns the validator and the next phases reject:**
 
@@ -235,7 +235,7 @@ The runner spawns one sub-designer per `subs` entry, gives each its
 contract + the same `state.yaml`, collects each sub's
 `plan-fragment.yaml`, then ALGORITHMICALLY (no LLM) injects connector
 belts between paired ports and builds the final plan that flows into
-dry-validate / execute / audit.
+dry-validate / verify / execute / observe.
 
 In decomposition mode you do NOT write `placements` / `connections` /
 `expected_throughput` / `scaling_note` at the top level — those are
@@ -359,7 +359,7 @@ For each id to author:
        description: "<short>"
    realization:
      blueprint: lib/blueprints/<id>.json   # path AFTER promotion
-   audits:
+   meters:
      - id: <id>-meter                    # an id unique within this module
        port: <port-name>                 # name from inputs[]/outputs[] above
        metric: <metric-label>            # MUST equal epoch.target_metric.metric
@@ -382,11 +382,11 @@ For each id to author:
    must point to a blueprint entity whose `item` is in the kind's
    allowlist above. `kind: electric` is NOT valid — use `kind: power`.
 
-   **Choosing a port-meter audit.** For `kind: belt|pipe|power` you
+   **Choosing a port-meter.** For `kind: belt|pipe|power` you
    declare `port: <port-name>` (no `script:` field). The runner routes
-   the audit through `lib/meters/port-meter.lua`, which switches on the
+   the meter call through `lib/meters/port-meter.lua`, which switches on the
    port's kind and reads from the actual port entity at the placement's
-   world position. You do NOT author Lua audit scripts for these kinds.
+   world position. You do NOT author Lua meter scripts for these kinds.
 
    - `metric` is the label downstream tools key off of (e.g. `coal_per_s`,
      `power_kw`); it MUST match `epoch.target_metric.metric` when the
@@ -397,13 +397,13 @@ For each id to author:
 
    **Exotic metrics (pollution, heat, custom counters).** Only when the
    metric isn't covered by belt/pipe/power do you author a custom Lua
-   audit:
+   meter:
 
-   - Write `staged-modules/<id>-audit.lua`, reference it as
-     `script: staged-modules/<id>-audit.lua` (not `port:`).
+   - Write `staged-modules/<id>-meter.lua`, reference it as
+     `script: staged-modules/<id>-meter.lua` (not `port:`).
    - The script returns JSON `{ ok, tick, measured, ... }` where
      `measured` is on the metric's natural scale.
-   - The runner promotes it to `lib/audits/<id>-audit.lua` on audit
+   - The runner promotes it to `lib/meters/<id>-meter.lua` on verify
      pass and rewrites the path automatically.
 
    Read any existing `lib/modules/*.yaml` to confirm the shape; the
@@ -486,7 +486,7 @@ For each id to author:
 
      **Common failure mode** — a module that declares an input port but
      has no `starter_items` AND no `connections` entry feeding it will
-     audit as `measured: 0` (entity has recipe and power but no input).
+     verify as `measured: 0` (entity has recipe and power but no input).
      This is silent — verify won't tell you "no input"; you'll just see
      zero throughput.
    - `small-electric-pole` is 1x1, supplies power within a 7.5-tile
@@ -508,8 +508,8 @@ For each id to author:
 - yaml/json shape errors → validator rejects, you get a focused retry.
 - module passes shape validation but the blueprint's geometry is wrong
   (e.g. drill drops onto empty floor instead of furnace) → execute may
-  succeed but audit will measure ~0 throughput and the epoch fails. There
-  is no retry of authoring on audit failure in this iteration; iterate by
+  succeed but verify will measure ~0 throughput and the epoch fails. There
+  is no retry of authoring on verify failure in this iteration; iterate by
   re-running the epoch with prompt adjustments.
 
 ## Reading `executor_proposal` in TASK HISTORY

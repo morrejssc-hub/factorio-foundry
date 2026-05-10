@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { resolveAudit } from "../src/runner/audit-resolver.js";
+import { resolveMeter } from "../src/runner/meter-resolver.js";
 
 const ROOT = "/root";
 
@@ -13,7 +13,7 @@ function makePortModule({ kind, item }) {
       outputs: [
         { name: "out", side: "south", rel_pos: [0.5, 2.5], item, kind, throughput: 1 },
       ],
-      audits: [{
+      meters: [{
         id: "my-mod-meter",
         port: "out",
         metric: `${kind}_metric`,
@@ -32,8 +32,8 @@ function planWithPlacement({ x, y, direction = "north" }) {
   };
 }
 
-test("audit.port: belt → port-meter scriptPath, port_kind+item in params", () => {
-  const r = resolveAudit({
+test("meter.port: belt → port-meter scriptPath, port_kind+item in params", () => {
+  const r = resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "belt", item: "coal" }),
     plan: planWithPlacement({ x: 10, y: 20 }),
@@ -47,11 +47,11 @@ test("audit.port: belt → port-meter scriptPath, port_kind+item in params", () 
   assert.equal(r.params.window_ticks, 3600);
   assert.equal(r.metric, "belt_metric");
   assert.equal(r.moduleId, "my-mod");
-  assert.equal(r.auditId, "my-mod-meter");
+  assert.equal(r.meterId, "my-mod-meter");
 });
 
-test("audit.port: pipe → fluid in params (not item)", () => {
-  const r = resolveAudit({
+test("meter.port: pipe → fluid in params (not item)", () => {
+  const r = resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "pipe", item: "water" }),
     plan: planWithPlacement({ x: 0, y: 0 }),
@@ -62,8 +62,8 @@ test("audit.port: pipe → fluid in params (not item)", () => {
   assert.equal(r.params.item, undefined);
 });
 
-test("audit.port: power → no item/fluid in params, just port_kind+position", () => {
-  const r = resolveAudit({
+test("meter.port: power → no item/fluid in params, just port_kind+position", () => {
+  const r = resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "power", item: "electricity" }),
     plan: planWithPlacement({ x: -9, y: -47 }),
@@ -75,9 +75,9 @@ test("audit.port: power → no item/fluid in params, just port_kind+position", (
   assert.deepEqual(r.params.port_position, { x: -8.5, y: -44.5 });
 });
 
-test("audit.port: rotation applied for east-facing placement", () => {
+test("meter.port: rotation applied for east-facing placement", () => {
   // rel_pos [0.5, 2.5] under east rotation: (x, y) → (-y, x) = (-2.5, 0.5)
-  const r = resolveAudit({
+  const r = resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "belt", item: "coal" }),
     plan: planWithPlacement({ x: 10, y: 20, direction: "east" }),
@@ -86,8 +86,8 @@ test("audit.port: rotation applied for east-facing placement", () => {
   assert.deepEqual(r.params.port_position, { x: 7.5, y: 20.5 });
 });
 
-test("audit.port: throws when no placement uses the audited module", () => {
-  assert.throws(() => resolveAudit({
+test("meter.port: throws when no placement uses the metered module", () => {
+  assert.throws(() => resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "belt", item: "coal" }),
     plan: { placements: [] },
@@ -95,8 +95,8 @@ test("audit.port: throws when no placement uses the audited module", () => {
   }), /needs a placement of module 'my-mod'/);
 });
 
-test("audit.port: throws on multiple placements (V1 ambiguity guard)", () => {
-  assert.throws(() => resolveAudit({
+test("meter.port: throws on multiple placements (V1 ambiguity guard)", () => {
+  assert.throws(() => resolveMeter({
     targetMetric: { module: "my-mod" },
     modules: makePortModule({ kind: "belt", item: "coal" }),
     plan: {
@@ -109,7 +109,7 @@ test("audit.port: throws on multiple placements (V1 ambiguity guard)", () => {
   }), /ambiguous/);
 });
 
-test("audit.port: throws when port name doesn't match module ports", () => {
+test("meter.port: throws when port name doesn't match module ports", () => {
   const modules = new Map([
     ["my-mod", {
       id: "my-mod",
@@ -117,10 +117,10 @@ test("audit.port: throws when port name doesn't match module ports", () => {
       outputs: [
         { name: "out", side: "south", rel_pos: [0, 0], item: "coal", kind: "belt", throughput: 1 },
       ],
-      audits: [{ id: "bad", port: "nope", metric: "x", aggregate: "rate_from_cumulative" }],
+      meters: [{ id: "bad", port: "nope", metric: "x", aggregate: "rate_from_cumulative" }],
     }],
   ]);
-  assert.throws(() => resolveAudit({
+  assert.throws(() => resolveMeter({
     targetMetric: { module: "my-mod" },
     modules,
     plan: planWithPlacement({ x: 0, y: 0 }),
@@ -128,25 +128,25 @@ test("audit.port: throws when port name doesn't match module ports", () => {
   }), /no port named 'nope'/);
 });
 
-test("legacy script: audit unaffected by port-branch (regression check)", () => {
+test("legacy script: meter unaffected by port-branch (regression check)", () => {
   const modules = new Map([
     ["legacy", {
       id: "legacy",
-      audits: [{
+      meters: [{
         id: "leg",
-        script: "lib/audits/throughput-window.lua",
+        script: "lib/meters/throughput-window.lua",
         metric: "coal_per_s",
         aggregate: "rate_from_cumulative",
         params: { item: "coal", window_ticks: 3600 },
       }],
     }],
   ]);
-  const r = resolveAudit({
+  const r = resolveMeter({
     targetMetric: { module: "legacy" },
     modules,
     rootDir: ROOT,
   });
-  assert.equal(r.scriptRel, "lib/audits/throughput-window.lua");
+  assert.equal(r.scriptRel, "lib/meters/throughput-window.lua");
   assert.equal(r.params.item, "coal");
   assert.equal(r.params.port_kind, undefined);
 });

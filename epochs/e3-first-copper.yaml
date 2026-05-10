@@ -12,7 +12,7 @@ goal: |
   drift without forcing a retry, and (c) probe surfaces non-stock resource
   patches via state.extra.<resource>_patches as the prompt now instructs.
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: copper-plate
     min_rate_per_s: 0.05

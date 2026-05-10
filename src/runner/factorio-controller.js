@@ -78,7 +78,7 @@ export class FactorioController {
 
   // Read a Lua script from disk, wrap with buildLuaCommand, RCON it, parse
   // the JSON response. Replaces the duplicated rconRunScript helper that
-  // previously lived in both audit.js and verify.js.
+  // previously lived in both observe.js and verify.js.
   async runLuaScript(scriptPath, params = {}, timeoutMs = 15000) {
     const lua = await readFile(scriptPath, "utf8");
     const command = buildLuaCommand(scriptPath.split("/").pop(), lua, params);
@@ -144,7 +144,7 @@ export class FactorioController {
 
   // Advance the simulation by N ticks. Goes through HTTP because the
   // wait_ticks action drives factorio-server's stepper (and the existing
-  // implementation already uses HTTP). Replaces audit.js's local waitTicks.
+  // implementation already uses HTTP). Replaces observe.js's local waitTicks.
   async advanceTicks(ticks) {
     const timeoutMs = Math.ceil((ticks / TICKS_PER_SECOND) * 1000) + 60_000;
     const response = await fetch(`${this.config.serviceUrl}/tool/factorio_action`, {

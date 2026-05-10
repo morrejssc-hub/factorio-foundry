@@ -28,7 +28,7 @@ footprint:
   max: [1, 1]
 realization:
   blueprint: lib/blueprints/m.json
-audits:
+meters:
   - id: m-meter
     port: out
     metric: coal_per_s
@@ -40,20 +40,20 @@ const VALID_BELT_BLUEPRINT = JSON.stringify({
   ports: { out: { entity: "belt_a", kind: "belt", item: "coal" } },
 });
 
-test("audits[].port form passes validation when port name + kind match", async () => {
+test("meters[].port form passes validation when port name + kind match", async () => {
   const { lib, root } = await makeLib(VALID_BELT_YAML, VALID_BELT_BLUEPRINT);
   try {
     const modules = await loadAllModules(lib);
     const m = modules.get("m");
-    assert.equal(m.audits[0].port, "out");
-    assert.equal(m.audits[0].script, undefined);
+    assert.equal(m.meters[0].port, "out");
+    assert.equal(m.meters[0].script, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("audits[] rejects entry with both script and port", async () => {
-  const yaml = VALID_BELT_YAML + `    script: lib/audits/x.lua\n`;
+test("meters[] rejects entry with both script and port", async () => {
+  const yaml = VALID_BELT_YAML + `    script: lib/meters/x.lua\n`;
   const { lib, root } = await makeLib(yaml, VALID_BELT_BLUEPRINT);
   try {
     await assert.rejects(
@@ -65,7 +65,7 @@ test("audits[] rejects entry with both script and port", async () => {
   }
 });
 
-test("audits[] rejects entry with neither script nor port", async () => {
+test("meters[] rejects entry with neither script nor port", async () => {
   const yaml = VALID_BELT_YAML.replace(/^    port: out$/m, "");
   const { lib, root } = await makeLib(yaml, VALID_BELT_BLUEPRINT);
   try {
@@ -78,7 +78,7 @@ test("audits[] rejects entry with neither script nor port", async () => {
   }
 });
 
-test("audits[].port rejects unknown port name", async () => {
+test("meters[].port rejects unknown port name", async () => {
   const yaml = VALID_BELT_YAML.replace("port: out", "port: nope");
   const { lib, root } = await makeLib(yaml, VALID_BELT_BLUEPRINT);
   try {
@@ -91,7 +91,7 @@ test("audits[].port rejects unknown port name", async () => {
   }
 });
 
-test("audits[].port rejects port whose kind isn't metered (inventory)", async () => {
+test("meters[].port rejects port whose kind isn't metered (inventory)", async () => {
   const yaml = VALID_BELT_YAML.replace("kind: belt", "kind: inventory");
   const blueprint = JSON.stringify({
     entities: [{ key: "chest_a", item: "iron-chest", dx: 0, dy: 0 }],

@@ -2,14 +2,14 @@ id: e7-unreachable-iron
 kind: composition
 depends_on: [e0-bootstrap]
 input_save: state/saves/e0-bootstrap-v1.zip
-recovery_attempts: 3   # NEW — orchestrator will retry design+execute+audit up
+recovery_attempts: 3   # NEW — orchestrator will retry design+verify+execute up
                        # to 3 times before giving up. probe runs once and is
                        # cached; world resets to input_save before each retry.
 goal: |
   Stress-test the all-attempts-fail recovery path with a TARGET ITEM that
   the allowed module physically cannot produce. coal-burner-cell is a
   drill+chest combo with NO furnace, so it cannot smelt iron-plate. We
-  ask audit to measure iron-plate throughput; the LLM has no escape:
+  ask the meter to measure iron-plate throughput; the LLM has no escape:
 
     - It can't author new modules (allow_module_creation is unset / false).
     - It can't relocate to a different ore patch — even drilling iron-ore
@@ -31,7 +31,7 @@ goal: |
     (e) attempts return shape is uniformly {attempts: <number>,
         attemptsDetail: [...]} on the failure path
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: iron-plate
     min_rate_per_s: 0.1

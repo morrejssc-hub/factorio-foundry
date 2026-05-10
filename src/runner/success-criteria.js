@@ -19,12 +19,12 @@
 //   cumulative_produced. The default `field: "measured"` keeps the
 //   legacy path that reads ctx.measured.
 //
-// `metric` defaults to the audit's primary metric. `min_count` defaults to 1.
+// `metric` defaults to the meter's primary metric. `min_count` defaults to 1.
 //
-// The runner calls `evaluateCriteria` AFTER the audit script has produced
-// `measured`. For criteria that need world introspection beyond the audit
-// script (entity_exists), we accept a callback so the audit module can
-// inject its rcon-bound entity counter without this file knowing about
+// The runner calls `evaluateCriteria` AFTER the meter script has produced
+// `measured`. For criteria that need world introspection beyond the meter
+// script (entity_exists), we accept a callback so the verify/observe module
+// can inject its rcon-bound entity counter without this file knowing about
 // rcon.
 //
 // Backward compatibility: when an epoch has no success_criteria but a
@@ -113,7 +113,7 @@ export function coerceLegacyCriteria({ targetMetric, defaultMetric }) {
  *
  * @param {object} c               — the criterion spec
  * @param {object} ctx
- * @param {number|null} ctx.measured — the audit script's measured value
+ * @param {number|null} ctx.measured — the meter script's measured value
  * @param {string|null} ctx.metric  — the metric label
  * @param {boolean} ctx.executeOk   — whether the execute phase succeeded
  * @param {(name: string) => Promise<number>} ctx.countEntities

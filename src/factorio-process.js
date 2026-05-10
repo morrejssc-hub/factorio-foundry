@@ -3,9 +3,9 @@
 // / factorio_wiki). Replaces the original ~/factorio-agent index.js without
 // the TaskQueue, PiRpc, and AdvisorPi services.
 //
-// The phase runners (probe / design / execute / audit) talk to Factorio
-// through this HTTP service indirectly: they spawn `pi -p` processes whose
-// vendored extensions POST /tool/factorio_action etc. Audit also opens its
+// The phase runners (probe / design / verify / execute / observe) talk to
+// Factorio through this HTTP service indirectly: they spawn `pi -p` processes
+// whose vendored extensions POST /tool/factorio_action etc. Observe opens its
 // own RCON connection for deterministic Lua probes.
 import { mkdir, symlink, lstat, writeFile } from "node:fs/promises";
 import { join } from "node:path";

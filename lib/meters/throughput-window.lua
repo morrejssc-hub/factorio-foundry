@@ -1,5 +1,5 @@
 -- throughput-window.lua
--- Deterministic audit: measure production rate of `item` over `window_ticks`.
+-- Deterministic meter: measure production rate of `item` over `window_ticks`.
 -- Returns a single rcon.print line with JSON `{ok, item, measured, target,
 -- pass, window_ticks, before, after}`.
 --

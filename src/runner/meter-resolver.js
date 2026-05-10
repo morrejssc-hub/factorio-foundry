@@ -1,33 +1,33 @@
-// audit-resolver.js — single resolver shared by runAudit (observe) and
-// runVerify. Translates an epoch's `target_metric` into a concrete
-// {scriptPath, params, aggregate, metric, threshold, item} record by
-// consulting the modules map (lib + staged) when needed.
+// meter-resolver.js — single resolver shared by runObserve (observe phase)
+// and runVerify (verify phase). Translates an epoch's `target_metric` into
+// a concrete {scriptPath, params, aggregate, metric, threshold, item}
+// record by consulting the modules map (lib + staged) when needed.
 //
 // Three target_metric shapes are supported:
 //
 //   1. Legacy direct path:
 //        target_metric:
-//          audit: lib/audits/throughput-window.lua
+//          meter: lib/meters/throughput-window.lua
 //          params: { item: coal, min_rate_per_s: 0.1, window_ticks: 3600 }
 //
-//   2. Module-driven (mature modules with an established audit):
+//   2. Module-driven (mature modules with an established meter):
 //        target_metric:
 //          module: coal-burner-cell
-//          audit_id: coal-burner-cell-throughput   # optional, defaults to first
+//          meter_id: coal-burner-cell-throughput   # optional, defaults to first
 //          params: { window_ticks: 3600 }          # override default_params
 //          threshold: 0.3
 //
-//   3. Goal-only (module-creation epochs — Designer authors the audit):
+//   3. Goal-only (module-creation epochs — Designer authors the meter):
 //        target_metric:
 //          metric: power_kw                        # required
 //          threshold: 100
 //          params: { window_ticks: 3600 }
-//      The resolver scans plan.placements → modules → audits, picks the
-//      single audit whose `metric` matches, and complains if 0 or >1 match.
+//      The resolver scans plan.placements → modules → meters, picks the
+//      single meter whose `metric` matches, and complains if 0 or >1 match.
 //
-// Each audits[] entry on a module declares EITHER `script: <path>` (legacy
+// Each meters[] entry on a module declares EITHER `script: <path>` (legacy
 // per-module Lua) OR `port: <port-name>` (unified port-meter dispatcher).
-// When the resolver picks an audit with `port:`, it computes the world
+// When the resolver picks a meter with `port:`, it computes the world
 // port_position from the placement + module port rel_pos, hard-codes
 // scriptPath = lib/meters/port-meter.lua, and packs port_kind + item into
 // params for the meter to switch on.
@@ -42,40 +42,40 @@ const PORT_METER_REL = "lib/meters/port-meter.lua";
 
 function resolveScriptPath({ scriptRel, module, rootDir, stagedDir }) {
   if (isAbsolute(scriptRel)) return scriptRel;
-  // Staged path: a module being authored references its in-flight audit lua
+  // Staged path: a module being authored references its in-flight meter lua
   // sitting in plans/<run>/candidates/cN/staged-modules/. After promotion the
-  // module yaml is rewritten to point at lib/audits/<basename>.lua, so this
+  // module yaml is rewritten to point at lib/meters/<basename>.lua, so this
   // branch only fires for not-yet-promoted (staged) modules.
   if (scriptRel.startsWith("staged-modules/")) {
     if (!stagedDir) {
-      throw new Error(`audit script '${scriptRel}' lives in staged-modules/ but no stagedDir was provided`);
+      throw new Error(`meter script '${scriptRel}' lives in staged-modules/ but no stagedDir was provided`);
     }
     const basename = scriptRel.slice("staged-modules/".length);
     return resolve(stagedDir, basename);
   }
-  // Anything else (lib/audits/..., scripts/...) resolves against rootDir.
+  // Anything else (lib/meters/..., scripts/...) resolves against rootDir.
   return resolve(rootDir, scriptRel);
 }
 
-function pickAuditFromModule(module, { auditId, metric }) {
-  const audits = Array.isArray(module.audits) ? module.audits : [];
-  if (audits.length === 0) {
-    throw new Error(`module '${module.id}' declares no audits[]`);
+function pickMeterFromModule(module, { meterId, metric }) {
+  const meters = Array.isArray(module.meters) ? module.meters : [];
+  if (meters.length === 0) {
+    throw new Error(`module '${module.id}' declares no meters[]`);
   }
-  if (auditId) {
-    const found = audits.find((a) => a.id === auditId);
-    if (!found) throw new Error(`module '${module.id}' has no audit with id '${auditId}'`);
+  if (meterId) {
+    const found = meters.find((m) => m.id === meterId);
+    if (!found) throw new Error(`module '${module.id}' has no meter with id '${meterId}'`);
     return found;
   }
   if (metric) {
-    const matches = audits.filter((a) => a.metric === metric);
+    const matches = meters.filter((m) => m.metric === metric);
     if (matches.length === 1) return matches[0];
     if (matches.length === 0) {
-      throw new Error(`module '${module.id}' has no audit with metric '${metric}'`);
+      throw new Error(`module '${module.id}' has no meter with metric '${metric}'`);
     }
-    throw new Error(`module '${module.id}' has ${matches.length} audits with metric '${metric}' — disambiguate with audit_id`);
+    throw new Error(`module '${module.id}' has ${matches.length} meters with metric '${metric}' — disambiguate with meter_id`);
   }
-  return audits[0];
+  return meters[0];
 }
 
 function findModuleByMetric(plan, modules, metric) {
@@ -84,27 +84,27 @@ function findModuleByMetric(plan, modules, metric) {
   for (const p of placements) {
     const mod = modules.get(p.module);
     if (!mod) continue;
-    const audits = Array.isArray(mod.audits) ? mod.audits : [];
-    if (audits.some((a) => a.metric === metric)) {
+    const meters = Array.isArray(mod.meters) ? mod.meters : [];
+    if (meters.some((m) => m.metric === metric)) {
       if (!matches.find((m) => m.id === mod.id)) matches.push(mod);
     }
   }
   if (matches.length === 1) return matches[0];
   if (matches.length === 0) {
-    throw new Error(`no placed module declares an audit with metric '${metric}'`);
+    throw new Error(`no placed module declares a meter with metric '${metric}'`);
   }
-  throw new Error(`${matches.length} placed modules declare audits with metric '${metric}' — disambiguate target_metric with module:<id>`);
+  throw new Error(`${matches.length} placed modules declare meters with metric '${metric}' — disambiguate target_metric with module:<id>`);
 }
 
 function findPlacementByModule(plan, moduleId) {
   const placements = (plan?.placements || []).filter((p) => p.module === moduleId);
   if (placements.length === 0) {
-    throw new Error(`port-meter audit needs a placement of module '${moduleId}' in plan, but none found`);
+    throw new Error(`port-meter needs a placement of module '${moduleId}' in plan, but none found`);
   }
   if (placements.length > 1) {
     throw new Error(
-      `port-meter audit on module '${moduleId}' is ambiguous: ${placements.length} placements in plan ` +
-      `(p${placements.map((p) => p.id ?? "?").join(", p")}). V1 supports a single placement per audited module.`,
+      `port-meter on module '${moduleId}' is ambiguous: ${placements.length} placements in plan ` +
+      `(p${placements.map((p) => p.id ?? "?").join(", p")}). V1 supports a single placement per metered module.`,
     );
   }
   return placements[0];
@@ -113,29 +113,29 @@ function findPlacementByModule(plan, moduleId) {
 function findPortOnModule(module, portName) {
   const port = [...(module.inputs || []), ...(module.outputs || [])].find((p) => p.name === portName);
   if (!port) {
-    throw new Error(`module '${module.id}' has no port named '${portName}' (audit references it)`);
+    throw new Error(`module '${module.id}' has no port named '${portName}' (meter references it)`);
   }
   return port;
 }
 
 /**
- * Build the resolver result for an audit entry that uses `port:` instead
+ * Build the resolver result for a meter entry that uses `port:` instead
  * of `script:`. Hard-codes scriptPath to the unified port-meter and packs
  * port_kind + port_position + item/fluid into params.
  */
-function resolvePortAudit({ module, audit, tm, plan, rootDir }) {
+function resolvePortMeter({ module, meter, tm, plan, rootDir }) {
   if (!plan) {
-    throw new Error(`audit '${audit.id}' on module '${module.id}' uses port: but no plan was provided`);
+    throw new Error(`meter '${meter.id}' on module '${module.id}' uses port: but no plan was provided`);
   }
   const placement = findPlacementByModule(plan, module.id);
-  const port = findPortOnModule(module, audit.port);
+  const port = findPortOnModule(module, meter.port);
   const [dx, dy] = port.rel_pos;
   const rotated = rotateRelPos(dx, dy, placement.direction);
   const portWorld = {
     x: placement.anchor.x + rotated.x,
     y: placement.anchor.y + rotated.y,
   };
-  // Param merge order: audit.params (defaults) ⊕ tm.params (epoch overrides)
+  // Param merge order: meter.params (defaults) ⊕ tm.params (epoch overrides)
   // ⊕ port-derived (port_kind, port_position, item/fluid) — port-derived
   // wins so the dispatcher always switches on the port's declared kind.
   const portParams = {
@@ -144,10 +144,10 @@ function resolvePortAudit({ module, audit, tm, plan, rootDir }) {
   };
   if (port.kind === "belt") portParams.item = port.item;
   if (port.kind === "pipe") portParams.fluid = port.item;
-  const params = { ...(audit.params || {}), ...(tm.params || {}), ...portParams };
-  const aggregate = audit.aggregate || "rate_from_cumulative";
+  const params = { ...(meter.params || {}), ...(tm.params || {}), ...portParams };
+  const aggregate = meter.aggregate || "rate_from_cumulative";
   if (!VALID_AGGREGATES.has(aggregate)) {
-    throw new Error(`module '${module.id}' audit '${audit.id}' has invalid aggregate '${aggregate}'`);
+    throw new Error(`module '${module.id}' meter '${meter.id}' has invalid aggregate '${aggregate}'`);
   }
   const threshold = tm.threshold
     ?? params.min_rate_per_s
@@ -158,16 +158,16 @@ function resolvePortAudit({ module, audit, tm, plan, rootDir }) {
     scriptRel: PORT_METER_REL,
     params,
     aggregate,
-    metric: audit.metric ?? tm.metric ?? null,
+    metric: meter.metric ?? tm.metric ?? null,
     threshold,
     item: port.kind === "belt" ? port.item : (port.kind === "pipe" ? port.item : null),
     moduleId: module.id,
-    auditId: audit.id,
+    meterId: meter.id,
   };
 }
 
 /**
- * Resolve a target_metric into a concrete audit invocation record.
+ * Resolve a target_metric into a concrete meter invocation record.
  *
  * @param {object} args
  * @param {object} args.targetMetric  — epoch.target_metric (any of 3 shapes)
@@ -184,31 +184,31 @@ function resolvePortAudit({ module, audit, tm, plan, rootDir }) {
  *   threshold: number,
  *   item: string|null,
  *   moduleId: string|null,
- *   auditId: string|null,
+ *   meterId: string|null,
  * }}
  */
-export function resolveAudit({ targetMetric, modules, plan, rootDir, stagedDir }) {
+export function resolveMeter({ targetMetric, modules, plan, rootDir, stagedDir }) {
   if (!targetMetric || typeof targetMetric !== "object") {
     throw new Error("target_metric missing or not an object");
   }
   const tm = targetMetric;
 
   // Shape 1: legacy direct path. Aggregate defaults to rate_from_cumulative
-  // because every legacy audit (throughput-window.lua) reports a cumulative
+  // because every legacy meter (throughput-window.lua) reports a cumulative
   // counter and the Node side computes the delta.
-  if (tm.audit && !tm.module && !tm.metric) {
+  if (tm.meter && !tm.module && !tm.metric) {
     const params = { ...(tm.params || {}) };
     const threshold = tm.threshold ?? params.min_rate_per_s ?? 0;
     return {
-      scriptPath: resolveScriptPath({ scriptRel: tm.audit, rootDir, stagedDir }),
-      scriptRel: tm.audit,
+      scriptPath: resolveScriptPath({ scriptRel: tm.meter, rootDir, stagedDir }),
+      scriptRel: tm.meter,
       params,
       aggregate: "rate_from_cumulative",
       metric: null,
       threshold,
       item: params.item ?? null,
       moduleId: null,
-      auditId: null,
+      meterId: null,
     };
   }
 
@@ -216,46 +216,46 @@ export function resolveAudit({ targetMetric, modules, plan, rootDir, stagedDir }
     throw new Error("target_metric.module / target_metric.metric requires a modules map");
   }
 
-  let module, audit;
+  let module, meter;
   if (tm.module) {
     module = modules.get(tm.module);
     if (!module) throw new Error(`target_metric.module '${tm.module}' not found in modules map`);
-    audit = pickAuditFromModule(module, { auditId: tm.audit_id, metric: tm.metric });
+    meter = pickMeterFromModule(module, { meterId: tm.meter_id, metric: tm.metric });
   } else if (tm.metric) {
     if (!plan) throw new Error("target_metric.metric requires a plan to scan placements");
     module = findModuleByMetric(plan, modules, tm.metric);
-    audit = pickAuditFromModule(module, { auditId: tm.audit_id, metric: tm.metric });
+    meter = pickMeterFromModule(module, { meterId: tm.meter_id, metric: tm.metric });
   } else {
-    throw new Error("target_metric must declare one of: audit, module, metric");
+    throw new Error("target_metric must declare one of: meter, module, metric");
   }
 
   // Branch: port-meter dispatcher vs legacy per-module script.
-  if (audit.port) {
-    return resolvePortAudit({ module, audit, tm, plan, rootDir });
+  if (meter.port) {
+    return resolvePortMeter({ module, meter, tm, plan, rootDir });
   }
 
-  const aggregate = audit.aggregate || "rate_from_cumulative";
+  const aggregate = meter.aggregate || "rate_from_cumulative";
   if (!VALID_AGGREGATES.has(aggregate)) {
-    throw new Error(`module '${module.id}' audit '${audit.id}' has invalid aggregate '${aggregate}'`);
+    throw new Error(`module '${module.id}' meter '${meter.id}' has invalid aggregate '${aggregate}'`);
   }
-  // Param merge: audit.params (defaults baked into the module) ⊕ tm.params
+  // Param merge: meter.params (defaults baked into the module) ⊕ tm.params
   // (epoch overrides). Threshold may live on tm directly or as legacy
   // min_rate_per_s/min_power_kw inside params.
-  const params = { ...(audit.params || {}), ...(tm.params || {}) };
+  const params = { ...(meter.params || {}), ...(tm.params || {}) };
   const threshold = tm.threshold
     ?? params.min_rate_per_s
     ?? params.min_power_kw
     ?? 0;
 
   return {
-    scriptPath: resolveScriptPath({ scriptRel: audit.script, module, rootDir, stagedDir }),
-    scriptRel: audit.script,
+    scriptPath: resolveScriptPath({ scriptRel: meter.script, module, rootDir, stagedDir }),
+    scriptRel: meter.script,
     params,
     aggregate,
-    metric: audit.metric ?? tm.metric ?? null,
+    metric: meter.metric ?? tm.metric ?? null,
     threshold,
     item: params.item ?? null,
     moduleId: module.id,
-    auditId: audit.id,
+    meterId: meter.id,
   };
 }

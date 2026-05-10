@@ -12,7 +12,7 @@ goal: |
   places a multi-entity blueprint that includes a stone furnace adjacent to
   a burner mining drill (drop-into-furnace geometry).
 target_metric:
-  audit: lib/audits/throughput-window.lua
+  meter: lib/meters/throughput-window.lua
   params:
     item: iron-plate
     min_rate_per_s: 0.05

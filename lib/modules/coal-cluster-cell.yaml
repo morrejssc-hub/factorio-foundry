@@ -29,7 +29,7 @@ realization:
   starter_fuel:
     - { item: coal, count: 11 }
 
-audits:
+meters:
   - id: coal-cluster-cell-throughput
-    script: lib/audits/throughput-window.lua
+    script: lib/meters/throughput-window.lua
     params: { item: coal, min_rate_per_s: 0.40, window_ticks: 3600 }
