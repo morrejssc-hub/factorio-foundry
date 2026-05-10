@@ -174,24 +174,19 @@ export async function runVerify({
         : [{ kind: "nonzero", metric }]);
   validateCriteria(criteria);
 
-  // Step 6: run meter window with harness ticker (yield-and-poll)
-  // NOTE: this loop intentionally uses setTimeout (wall-clock waiting) rather
-  // than controller.advanceTicks (sim-tick waiting). audit.js uses the latter.
-  // The divergence is a known finding (see docs/drifting-tinkering-crayon.md);
-  // unifying it would shift e1 measurement numbers and is deferred to a
-  // follow-up plan that re-baselines the smoke tests.
+  // Step 6: run meter window with harness ticker. advanceTicks drives the
+  // simulation forward sim-tick by sim-tick (matches audit.js semantics);
+  // chunking lets the harness ticker fire every 600 ticks (10s game-time).
   const verifyStart = Date.now();
-  const msPerTick = 1000 / TICKS_PER_SECOND;
   let ticksElapsed = 0;
   let before = null, after;
 
   if (aggregate === "snapshot_post") {
     while (ticksElapsed < windowTicks) {
-      const chunk = Math.min(windowTicks - ticksElapsed, 600); // 10s chunks
-      await new Promise((r) => setTimeout(r, Math.ceil(chunk * msPerTick)));
+      const chunk = Math.min(windowTicks - ticksElapsed, 600);
+      await controller.advanceTicks(chunk);
       ticksElapsed += chunk;
 
-      // Harness tick every 5s
       if (placedHarnessManifest.length > 0) {
         await controller.action("harness_tick", { manifest: placedHarnessManifest });
       }
@@ -204,7 +199,7 @@ export async function runVerify({
 
     while (ticksElapsed < windowTicks) {
       const chunk = Math.min(windowTicks - ticksElapsed, 600);
-      await new Promise((r) => setTimeout(r, Math.ceil(chunk * msPerTick)));
+      await controller.advanceTicks(chunk);
       ticksElapsed += chunk;
 
       if (placedHarnessManifest.length > 0) {
