@@ -7,7 +7,7 @@
 // with factorio_read + factorio_action tools and a focused repair prompt
 // giving it the failed step's context. The fallback is bounded — it gets
 // one chance per failed step, then the run is failed.
-import { mkdir, copyFile, readFile, writeFile, readdir, stat } from "node:fs/promises";
+import { mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { piInvoke } from "../pi-invoke.js";
 import { newTrace, addPiCall, writePiTrace } from "./pi-trace.js";
@@ -15,31 +15,8 @@ import { DIRECTION_NAMES } from "../geometry/schema.js";
 import { buildPlacementProposal, buildConnectionProposal } from "./executor-proposal.js";
 import { findPort } from "../lib-loader.js";
 
-export async function postAction(config, body, { timeoutMs = 60_000 } = {}) {
-  const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    const err = new Error(payload.error || `${body.action} HTTP ${response.status}`);
-    err.payload = payload;
-    err.status = response.status;
-    throw err;
-  }
-  return payload.result;
-}
-
-async function executeBlueprint({ config, blueprint, anchor, direction, dryRun }) {
-  return postAction(config, {
-    action: "execute_blueprint",
-    blueprint,
-    anchor,
-    direction,
-    dryRun,
-  });
+async function executeBlueprint({ controller, blueprint, anchor, direction, dryRun }) {
+  return controller.action("execute_blueprint", { blueprint, anchor, direction, dryRun });
 }
 
 // Pull blocked-tile positions out of an execute_blueprint precondition_failed
@@ -52,7 +29,7 @@ function blockedPositionsFromError(error) {
     .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
 }
 
-export async function placeOne({ config, placement, modules, log }) {
+export async function placeOne({ controller, placement, modules, log }) {
   const module = modules.get(placement.module);
   // Staged modules (newly authored in this run, not yet promoted to lib/)
   // pass the blueprint as an inline JSON object so the factorio service
@@ -77,13 +54,13 @@ export async function placeOne({ config, placement, modules, log }) {
   const doPlace = async () => {
     log(`[execute]   dryRun ${blueprintLabel}…`);
     const dry = await executeBlueprint({
-      config, blueprint: blueprintArg,
+      controller, blueprint: blueprintArg,
       anchor: placement.anchor, direction: placement.direction, dryRun: true,
     });
     log(`[execute]   dryRun ok=${dry.ok ?? "n/a"} required=${JSON.stringify(dry.requiredItems || dry.required || {})}`);
     log(`[execute]   placing live…`);
     const live = await executeBlueprint({
-      config, blueprint: blueprintArg,
+      controller, blueprint: blueprintArg,
       anchor: placement.anchor, direction: placement.direction, dryRun: false,
     });
     return { dry, live };
@@ -103,11 +80,7 @@ export async function placeOne({ config, placement, modules, log }) {
     log(`[execute]   ${positions.length} tile(s) blocked; trying clear_obstacles before repair`);
     let cleared;
     try {
-      cleared = await postAction(config, {
-        action: "clear_obstacles",
-        positions,
-        radius: 1.5,
-      });
+      cleared = await controller.action("clear_obstacles", { positions, radius: 1.5 });
     } catch (clearError) {
       log(`[execute]   clear_obstacles failed: ${clearError.message}; surfacing original placement error`);
       throw error;
@@ -126,7 +99,7 @@ export async function placeOne({ config, placement, modules, log }) {
 // whatever's on the tile (optionally name-filtered) and drop the items.
 // Designer prompt forbids this for natural debris (those are auto-cleared
 // at placement time) — preparation is reserved for player-placed teardown.
-export async function runPreparation({ config, plan, log }) {
+export async function runPreparation({ controller, plan, log }) {
   const ops = Array.isArray(plan.preparation) ? plan.preparation : [];
   if (ops.length === 0) return [];
   const results = [];
@@ -135,11 +108,7 @@ export async function runPreparation({ config, plan, log }) {
       const pos = op.position;
       log(`[execute][prep] ${i}: deconstruct at (${pos?.x},${pos?.y})${op.entity ? ` name=${op.entity}` : ""}`);
       try {
-        const r = await postAction(config, {
-          action: "deconstruct_at",
-          position: pos,
-          entity: op.entity,
-        });
+        const r = await controller.action("deconstruct_at", { position: pos, entity: op.entity });
         log(`[execute][prep] ${i}: destroyed ${r.destroyed} (${(r.names || []).join(", ") || "—"})`);
         results.push({ kind: "deconstruct", index: i, ok: true, destroyed: r.destroyed, names: r.names });
       } catch (err) {
@@ -154,7 +123,8 @@ export async function runPreparation({ config, plan, log }) {
   return results;
 }
 
-async function repairWithPi({ config, epoch, plan, placement, error, outDir, log, stateYamlPath }) {
+async function repairWithPi({ controller, epoch, plan, placement, error, outDir, log, stateYamlPath }) {
+  const config = controller.config;
   const repairDir = join(outDir, "repair", placement.id);
   await mkdir(repairDir, { recursive: true });
   await writeFile(join(repairDir, "plan.yaml"), JSON.stringify(plan, null, 2), "utf8");
@@ -288,9 +258,9 @@ export async function buildOccupiedTiles(plan, modules, rootDir) {
 //   { from: "p0.coal_belt", to: "p1.coal_in", required_throughput: 0.18 }
 // Connections without a dot (e.g. {from: "p0", to: "p1"}) are skipped —
 // they are informational-only annotations.
-export async function routeConnections({ config, plan, modules, log }) {
+export async function routeConnections({ controller, plan, modules, log }) {
   const placementById = new Map(plan.placements.map((p) => [p.id, p]));
-  const occupied = await buildOccupiedTiles(plan, modules, config.rootDir);
+  const occupied = await buildOccupiedTiles(plan, modules, controller.config.rootDir);
   const connections = [];
 
   for (const conn of (plan.connections || [])) {
@@ -335,12 +305,11 @@ export async function routeConnections({ config, plan, modules, log }) {
 
     log(`[execute][connect] ${fromStr} (${fromPos.x},${fromPos.y}) → ${toStr} (${toPos.x},${toPos.y})`);
     try {
-      const routeResult = await postAction(config, {
-        action: "route_belt",
-        from:     fromPos,
-        to:       toPos,
+      const routeResult = await controller.action("route_belt", {
+        from: fromPos,
+        to:   toPos,
         occupied,
-      }, { timeoutMs: 60_000 });
+      });
 
       if (!routeResult.ok) {
         throw new Error(`route_belt failed: ${routeResult.reason || routeResult.code || "unknown"}`);
@@ -373,7 +342,7 @@ export async function routeConnections({ config, plan, modules, log }) {
 
       const inlineBp = { version: 1, name: `conn_${fromStr}_${toStr}`, entities: bpEntities };
       const placeResult = await executeBlueprint({
-        config,
+        controller,
         blueprint: inlineBp,
         anchor: { x: 0, y: 0 },
         direction: "north",
@@ -393,23 +362,9 @@ export async function routeConnections({ config, plan, modules, log }) {
   return connections;
 }
 
-async function findNewestSave(savesDir) {
-  const entries = await readdir(savesDir).catch(() => []);
-  let latest = null;
-  for (const entry of entries) {
-    if (!entry.endsWith(".zip")) continue;
-    const path = join(savesDir, entry);
-    const info = await stat(path);
-    if (!latest || info.mtimeMs > latest.mtimeMs) {
-      latest = { path, mtimeMs: info.mtimeMs };
-    }
-  }
-  return latest;
-}
-
 /**
  * @param {object} args
- * @param {object} args.config
+ * @param {object} args.controller
  * @param {object} args.epoch
  * @param {object} args.plan
  * @param {Map<string, object>} args.modules
@@ -417,14 +372,14 @@ async function findNewestSave(savesDir) {
  * @param {string} args.savePathOut  — destination for the produced save zip
  * @returns {Promise<{savePath: string, perPlacement: object[]}>}
  */
-export async function runExecute({ config, epoch, plan, modules, outDir, savePathOut, stateYamlPath }) {
+export async function runExecute({ controller, epoch, plan, modules, outDir, savePathOut, stateYamlPath }) {
   await mkdir(outDir, { recursive: true });
   const log = (msg) => {
     console.log(msg);
   };
   let preparationResults = [];
   try {
-    preparationResults = await runPreparation({ config, plan, log });
+    preparationResults = await runPreparation({ controller, plan, log });
   } catch (prepError) {
     await writeFile(join(outDir, "execute.json"), JSON.stringify({
       ok: false, preparation: preparationResults, perPlacement: [],
@@ -435,12 +390,12 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
   const perPlacement = [];
   for (const placement of plan.placements) {
     try {
-      const r = await placeOne({ config, placement, modules, log });
+      const r = await placeOne({ controller, placement, modules, log });
       perPlacement.push({ placement: placement.id, ok: true, dry: r.dry, live: r.live });
     } catch (error) {
       log(`[execute] placement ${placement.id} failed: ${error.message}`);
       try {
-        await repairWithPi({ config, epoch, plan, placement, error, outDir, log, stateYamlPath });
+        await repairWithPi({ controller, epoch, plan, placement, error, outDir, log, stateYamlPath });
         perPlacement.push({ placement: placement.id, ok: true, repaired: true });
       } catch (repairError) {
         perPlacement.push({ placement: placement.id, ok: false, error: error.message, repairError: repairError.message });
@@ -460,7 +415,7 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
 
   let connectionResults;
   try {
-    connectionResults = await routeConnections({ config, plan, modules, log });
+    connectionResults = await routeConnections({ controller, plan, modules, log });
   } catch (connError) {
     // routeConnections throws "connection <from>→<to> failed: <reason>".
     // Parse the from/to back out so the proposal can name the offending pair.
@@ -475,11 +430,7 @@ export async function runExecute({ config, epoch, plan, modules, outDir, savePat
   }
 
   log(`[execute] saving game…`);
-  await postAction(config, { action: "save" }, { timeoutMs: 60_000 });
-  const newest = await findNewestSave(config.savesDir);
-  if (!newest) throw new Error(`save action did not produce a save in ${config.savesDir}`);
-  await mkdir(resolve(savePathOut, ".."), { recursive: true });
-  await copyFile(newest.path, savePathOut);
+  await controller.exportZip(savePathOut);
   await writeFile(join(outDir, "execute.json"), JSON.stringify({
     ok: true,
     preparation: preparationResults,

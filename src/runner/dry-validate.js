@@ -38,20 +38,14 @@ async function expandPlacementToEntities(placement, module) {
   }));
 }
 
-async function callValidatePlacement(config, entities) {
-  const response = await fetch(`${config.serviceUrl}/tool/factorio_read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "query_script", script: "lib/validate-placement.lua", params: { entities } }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    throw new Error(`validate_placement HTTP ${response.status}: ${payload?.error || "unknown"}`);
-  }
+async function callValidatePlacement(controller, entities) {
+  const result = await controller.read("query_script", {
+    script: "lib/validate-placement.lua",
+    params: { entities },
+  }, { timeoutMs: 60_000 });
   // factorio_read returns { script, output, readonly }. The Lua probe
   // rcon.print's a JSON object; output is that JSON string.
-  const raw = payload.result?.output ?? payload.output ?? "";
+  const raw = result?.output ?? "";
   try {
     return JSON.parse(raw);
   } catch {
@@ -160,13 +154,13 @@ function checkConnections(plan, placedById, modules) {
  * @param {object} args.plan      — parsed plan.yaml
  * @param {Map<string, object>} args.modules — from loadAllModules
  * @param {string} args.outDir    — plans/<run>/ directory
- * @param {object} [args.config]  — optional runner config; when provided
- *   (config.serviceUrl), tile-aware can_place_entity is checked against the
- *   live Factorio surface via the validate_placement probe. Skipped in
- *   parallel-design candidate scoring where no instance is yet attached.
+ * @param {object} [args.controller] — optional FactorioController; when provided,
+ *   tile-aware can_place_entity is checked against the live Factorio surface
+ *   via the validate_placement probe. Skipped in parallel-design candidate
+ *   scoring where no instance is yet attached.
  * @returns {Promise<{ok: boolean, errors: string[], canplace?: object}>}
  */
-export async function runDryValidate({ plan, modules, outDir, config = null }) {
+export async function runDryValidate({ plan, modules, outDir, controller = null }) {
   const errors = [];
   if (!Array.isArray(plan.placements) || plan.placements.length === 0) {
     errors.push("plan.placements must be a non-empty array");
@@ -202,7 +196,7 @@ export async function runDryValidate({ plan, modules, outDir, config = null }) {
   // from a previous epoch — which dry-validate cannot know about without
   // talking to Factorio.
   let canplaceReport = null;
-  if (errors.length === 0 && config?.serviceUrl) {
+  if (errors.length === 0 && controller) {
     try {
       const allEntities = [];
       for (const p of placementResult.placed) {
@@ -210,7 +204,7 @@ export async function runDryValidate({ plan, modules, outDir, config = null }) {
         allEntities.push(...expanded);
       }
       if (allEntities.length > 0) {
-        const probe = await callValidatePlacement(config, allEntities);
+        const probe = await callValidatePlacement(controller, allEntities);
         canplaceReport = probe;
         for (const r of probe.results || []) {
           if (r.canPlace) continue;

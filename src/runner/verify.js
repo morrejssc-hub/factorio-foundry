@@ -2,80 +2,41 @@
 // placement, harness placement, meter window with ticker, criteria
 // evaluation, harness teardown, and save-on-pass.
 //
-// Replaces the former execute + audit split. The pipeline is:
-//   static → place modules → place harness → window+ticker → meter → criteria → teardown → save
+// NOTE: the "verify replaces execute" framing in this header reflects the
+// long-term intent (see verify-plan.md). Today verify still runs alongside a
+// separate runExecute call in epoch.js — verify dirties a fork with harness,
+// then epoch.js reloads input save and re-runs runExecute on the clean save.
+// See docs/drifting-tinkering-crayon.md for the planned snapshot/rollback
+// migration that will make the header literally true.
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   placeOne,
   runPreparation,
   routeConnections,
-  rotateRelPos,
-  postAction,
 } from "./execute.js";
 import { runDryValidate } from "./dry-validate.js";
 import { resolveAudit } from "./audit-resolver.js";
 import {
   evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
 } from "./success-criteria.js";
-import { readFile } from "node:fs/promises";
-import { rconExec, buildLuaCommand } from "../rcon.js";
 
 const TICKS_PER_SECOND = 60;
-const ENTITY_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
-const HARNESS_TICK_INTERVAL_MS = 5000;
-
-async function rconCountEntities(config) {
-  const command = `/silent-command rcon.print(#game.surfaces[1].find_entities())`;
-  const body = await rconExec({
-    host: config.rconHost, port: config.rconPort,
-    password: config.rconPassword, command, timeoutMs: 10000,
-  });
-  return parseInt(body.trim(), 10) || 0;
-}
-
-async function rconCountEntitiesByName({ config, name, surface = "nauvis" }) {
-  if (!ENTITY_NAME_RE.test(name)) {
-    throw new Error(`refusing to query entity name with unsafe chars: ${JSON.stringify(name)}`);
-  }
-  if (!ENTITY_NAME_RE.test(surface)) {
-    throw new Error(`refusing to query surface with unsafe chars: ${JSON.stringify(surface)}`);
-  }
-  const command = `/silent-command rcon.print(#game.surfaces["${surface}"].find_entities_filtered{name="${name}"})`;
-  const body = await rconExec({
-    host: config.rconHost, port: config.rconPort,
-    password: config.rconPassword, command, timeoutMs: 10000,
-  });
-  const n = parseInt(body.trim(), 10);
-  return Number.isFinite(n) ? n : 0;
-}
-
-async function rconRunScript({ config, scriptPath, params }) {
-  const lua = await readFile(scriptPath, "utf8");
-  const command = buildLuaCommand(scriptPath.split("/").pop(), lua, params);
-  const body = await rconExec({
-    host: config.rconHost,
-    port: config.rconPort,
-    password: config.rconPassword,
-    command,
-    timeoutMs: 15000,
-  });
-  let parsed;
-  try {
-    parsed = JSON.parse(body.trim());
-  } catch (error) {
-    throw new Error(`meter script returned non-JSON: ${body.slice(0, 200)}`);
-  }
-  if (parsed.ok === false && typeof parsed.measured !== "number" && typeof parsed.cumulative_produced !== "number") {
-    throw new Error(`meter script failed: ${parsed.error || "unknown"}`);
-  }
-  return parsed;
-}
 
 function readMeasured(snapshot) {
   if (typeof snapshot.measured === "number") return snapshot.measured;
   if (typeof snapshot.cumulative_produced === "number") return snapshot.cumulative_produced;
   throw new Error(`meter script must return numeric measured (or legacy cumulative_produced)`);
+}
+
+// Same `ok === false` semantics as audit.js: tolerate scripts that conflate
+// ok with "passes threshold" so long as they still return a usable measured.
+function assertSnapshotUsable(snap) {
+  if (snap && snap.ok === false
+      && typeof snap.measured !== "number"
+      && typeof snap.cumulative_produced !== "number") {
+    throw new Error(`meter script failed: ${snap.error || "unknown"}`);
+  }
 }
 
 // Derive harness port_specs from plan placements and their modules.
@@ -142,8 +103,7 @@ function derivePowerHarnessManifest(plan, modules) {
 
 /**
  * @param {object} args
- * @param {object} args.config         — loaded foundry config
- * @param {object} args.factorio       — FactorioServer instance
+ * @param {object} args.controller     — FactorioController
  * @param {object} args.epoch          — epoch metadata
  * @param {object} args.plan           — plan.yaml object
  * @param {Map<string, object>} args.modules — module map (lib + staged)
@@ -152,7 +112,7 @@ function derivePowerHarnessManifest(plan, modules) {
  * @returns {Promise<{verdict: object, perPlacement?: object[]}>}
  */
 export async function runVerify({
-  config, factorio, epoch, plan, modules, outDir, stateYamlPath,
+  controller, epoch, plan, modules, outDir, stateYamlPath,
 }) {
   await mkdir(outDir, { recursive: true });
 
@@ -163,11 +123,11 @@ export async function runVerify({
   }
 
   // Step 2: place modules (reuse execute.js helpers)
-  const preparation = await runPreparation({ config, plan, log: () => {} });
+  await runPreparation({ controller, plan, log: () => {} });
   const perPlacement = [];
   for (const placement of plan.placements) {
     try {
-      const result = await placeOne({ config, placement, modules, log: () => {} });
+      const result = await placeOne({ controller, placement, modules, log: () => {} });
       perPlacement.push({ placement, ok: true, dry: result.dry, live: result.live });
     } catch (err) {
       perPlacement.push({ placement, ok: false, error: err.message });
@@ -176,14 +136,14 @@ export async function runVerify({
   }
 
   // Step 3: route connections
-  await routeConnections({ config, plan, modules, log: () => {} });
+  await routeConnections({ controller, plan, modules, log: () => {} });
 
   // Step 4: place item harness
   const harnessManifest = deriveHarnessManifest(plan, modules);
   let placedHarnessManifest = [];
   if (harnessManifest.length > 0) {
     console.log(`[verify] harness input: ${JSON.stringify(harnessManifest)}`);
-    const placeResult = await factorio.handleAction({ action: "place_harness", placements: harnessManifest });
+    const placeResult = await controller.action("place_harness", { placements: harnessManifest });
     console.log(`[verify] place_harness result: placed=${placeResult?.placed} manifest=${JSON.stringify(placeResult?.manifest)}`);
     placedHarnessManifest = Array.isArray(placeResult?.manifest) ? placeResult.manifest : [];
   }
@@ -191,7 +151,7 @@ export async function runVerify({
   // Step 4b: place power harness (accumulator + pole at power ports)
   const powerHarnessManifest = derivePowerHarnessManifest(plan, modules);
   if (powerHarnessManifest.length > 0) {
-    await factorio.handleAction({ action: "power_harness_setup", placements: powerHarnessManifest });
+    await controller.action("power_harness_setup", { placements: powerHarnessManifest });
   }
 
   // DEBUG: inspect placed entities around the first placement
@@ -236,10 +196,7 @@ rcon.print("[debug] harness inserters: "..#his)
 for _,i in ipairs(his) do
   rcon.print(string.format("[debug]   ins @(%.0f,%.0f) dir=%s pickup=(%.1f,%.1f) drop=(%.1f,%.1f)", i.position.x, i.position.y, tostring(i.direction), i.pickup_position.x, i.pickup_position.y, i.drop_position.x, i.drop_position.y))
 end`;
-    const debugOut = await rconExec({
-      host: config.rconHost, port: config.rconPort, password: config.rconPassword,
-      command: `/sc ${inspectLua}`, timeoutMs: 15000,
-    });
+    const debugOut = await controller.rcon(`/sc ${inspectLua}`, 15000);
     console.log(`[verify-debug] post-harness state:\n${debugOut}`);
   }
 
@@ -249,7 +206,7 @@ end`;
     modules,
     plan,
     stagedDir: outDir.replace(/\/execute$/, "") + "/staged-modules",
-    rootDir: config.rootDir,
+    rootDir: controller.config.rootDir,
   });
   const { scriptPath, params, aggregate, metric, item, moduleId, auditId } = resolved;
   const windowTicks = params.window_ticks ?? 3600;
@@ -264,14 +221,17 @@ end`;
   validateCriteria(criteria);
 
   // Step 6: run meter window with harness ticker (yield-and-poll)
+  // NOTE: this loop intentionally uses setTimeout (wall-clock waiting) rather
+  // than controller.advanceTicks (sim-tick waiting). audit.js uses the latter.
+  // The divergence is a known finding (see docs/drifting-tinkering-crayon.md);
+  // unifying it would shift e1 measurement numbers and is deferred to a
+  // follow-up plan that re-baselines the smoke tests.
   const verifyStart = Date.now();
   const msPerTick = 1000 / TICKS_PER_SECOND;
-  const totalMs = windowTicks * msPerTick;
   let ticksElapsed = 0;
   let before = null, after;
 
   if (aggregate === "snapshot_post") {
-    // Single snapshot: wait the full window, then run meter once
     while (ticksElapsed < windowTicks) {
       const chunk = Math.min(windowTicks - ticksElapsed, 600); // 10s chunks
       await new Promise((r) => setTimeout(r, Math.ceil(chunk * msPerTick)));
@@ -279,31 +239,31 @@ end`;
 
       // Harness tick every 5s
       if (placedHarnessManifest.length > 0) {
-        await factorio.handleAction({ action: "harness_tick", manifest: placedHarnessManifest });
+        await controller.action("harness_tick", { manifest: placedHarnessManifest });
       }
     }
-    after = await rconRunScript({ config, scriptPath, params });
+    after = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(after);
   } else {
-    // Before snapshot
-    before = await rconRunScript({ config, scriptPath, params });
+    before = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(before);
 
-    // Wait window with periodic harness ticks
     while (ticksElapsed < windowTicks) {
       const chunk = Math.min(windowTicks - ticksElapsed, 600);
       await new Promise((r) => setTimeout(r, Math.ceil(chunk * msPerTick)));
       ticksElapsed += chunk;
 
       if (placedHarnessManifest.length > 0) {
-        await factorio.handleAction({ action: "harness_tick", manifest: placedHarnessManifest });
+        await controller.action("harness_tick", { manifest: placedHarnessManifest });
       }
     }
 
-    // After snapshot
-    after = await rconRunScript({ config, scriptPath, params });
+    after = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(after);
   }
 
   const wall_clock_ms = Date.now() - verifyStart;
-  const entity_count = await rconCountEntities(config).catch(() => null);
+  const entity_count = await controller.countEntities().catch(() => null);
 
   // Step 7: compute measured value
   const tickDelta = before ? (after.tick - before.tick) : windowTicks;
@@ -327,7 +287,7 @@ end`;
     metric,
     snapshot: after || null,
     executeOk: true,
-    countEntities: (name) => rconCountEntitiesByName({ config, name }),
+    countEntities: (name) => controller.countEntitiesByName({ name }),
   };
   const { pass, results: criteriaResults } = await evaluateCriteria(criteria, ctx);
 
@@ -359,7 +319,7 @@ end`;
   // Both item and power harness entities live on audit-harness force, so
   // a single harness_teardown call destroys all of them.
   if (harnessManifest.length > 0 || powerHarnessManifest.length > 0) {
-    await factorio.handleAction({ action: "harness_teardown" });
+    await controller.action("harness_teardown");
   }
 
   // Write audit.json for backward compatibility with tooling that reads it

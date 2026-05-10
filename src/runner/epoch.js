@@ -8,7 +8,6 @@
 import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { rconExec } from "../rcon.js";
 import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
@@ -17,6 +16,7 @@ import { runVerify } from "./verify.js";
 import { runExecute } from "./execute.js";
 import { runAudit } from "./audit.js";
 import { InstancePool } from "./instance-pool.js";
+import { FactorioController } from "./factorio-controller.js";
 import { writeSummary } from "./run-summary.js";
 import {
   candidateId, candidateDir, epochSaveDir, runSavePath,
@@ -39,17 +39,7 @@ export async function loadEpoch(epochsDir, epochId) {
   return parsed;
 }
 
-async function rcon(config, command, timeoutMs = 30000) {
-  return rconExec({
-    host: config.rconHost,
-    port: config.rconPort,
-    password: config.rconPassword,
-    command,
-    timeoutMs,
-  });
-}
-
-async function stockWorkerInventory(config, items) {
+async function stockWorkerInventory(controller, items) {
   // Insert items into the tagged worker character. The worker is created
   // automatically by factorio-server.js on the first action call; here we
   // ensure it exists by issuing a silent-command that creates one if missing.
@@ -76,48 +66,25 @@ async function stockWorkerInventory(config, items) {
     rcon.print("ok=true tick=" .. game.tick)
   `;
   const command = `/silent-command ${lua.replace(/\s+/g, " ").trim()}`;
-  const output = await rcon(config, command);
+  const output = await controller.rcon(command, 30000);
   if (!output.includes("ok=true")) {
     throw new Error(`stock_worker_inventory failed: ${output}`);
   }
   return output;
 }
 
-async function ensureFactorioStartedFromSave({ factorio, savePath }) {
-  // Stop any running instance, replace the in-runtime save with the supplied
-  // input save zip, then start. The factorio-server.js start() expects
-  // `runtime/saves/main.zip` (configurable via FACTORIO_SAVE_NAME).
-  if (factorio.isRunning()) await factorio.stop();
-  if (savePath) {
-    const target = factorio.savePath();
-    await mkdir(resolve(target, ".."), { recursive: true });
-    await copyFile(savePath, target);
-  }
-  await factorio.start();
-}
-
-async function runBootstrapEpoch({ config, factorio, epoch, log }) {
+async function runBootstrapEpoch({ controller, config, epoch, log }) {
   log(`[epoch ${epoch.id}] bootstrap kind: creating fresh save`);
   // Force fresh save: remove any existing main.zip so factorio-server.js
   // creates one via --create.
-  if (factorio.isRunning()) await factorio.stop();
-  await rm(factorio.savePath(), { force: true });
-  await factorio.start();
+  if (controller.isRunning()) await controller.stop();
+  await rm(controller.savePath(), { force: true });
+  await controller.start();
   log(`[epoch ${epoch.id}] factorio ready, stocking worker inventory…`);
-  await stockWorkerInventory(config, epoch.starter_inventory || []);
+  await stockWorkerInventory(controller, epoch.starter_inventory || []);
   log(`[epoch ${epoch.id}] saving as ${epoch.output_save}…`);
-  await rcon(config, "/server-save");
-  // Wait briefly for save file flush.
-  await new Promise((r) => setTimeout(r, 2000));
-  const newest = await import("node:fs/promises").then((mod) => mod.readdir(config.savesDir));
-  const candidates = newest.filter((n) => n.endsWith(".zip"));
-  if (!candidates.length) throw new Error("no save zip found after /server-save");
-  const newestPath = candidates
-    .map((n) => ({ name: n, path: join(config.savesDir, n) }))
-    .pop();
   const out = resolve(config.rootDir, epoch.output_save);
-  await mkdir(resolve(out, ".."), { recursive: true });
-  await copyFile(newestPath.path, out);
+  await controller.exportZip(out);
   log(`[epoch ${epoch.id}] output save → ${out}`);
   // Bootstrap = clean slate. Reset world.md so any prior chain's deployed
   // modules don't bleed into the new chain. (Re-running bootstrap is the
@@ -130,10 +97,11 @@ async function runBootstrapEpoch({ config, factorio, epoch, log }) {
 
 async function runCompositionEpoch({ config, factorio, epoch, log }) {
   if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
+  const controller = new FactorioController(factorio, config);
   const inputSave = resolveInputSave(config, epoch.input_save);
   const maxAttempts = Math.max(1, Number(epoch.recovery_attempts) || 1);
   log(`[epoch ${epoch.id}] starting from save ${inputSave}` + (maxAttempts > 1 ? ` (recovery_attempts=${maxAttempts})` : ""));
-  await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+  await controller.loadSave(inputSave);
 
   const runTs = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
@@ -181,7 +149,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
 
     if (attempt > 1) {
       log(`[epoch ${epoch.id}] retry attempt ${attempt}/${maxAttempts} — resetting world to input_save`);
-      await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+      await controller.loadSave(inputSave);
     }
 
     let designResult, modules, dryResult, exResult, verdict, observeVerdict;
@@ -218,7 +186,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
           plan: designResult.plan,
           modules,
           outDir: candDir,
-          config,
+          controller,
         });
         if (dryResult.ok) {
           log(`[epoch ${epoch.id}] attempt ${attempt}: dry-validate ok`);
@@ -255,8 +223,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
 
       log(`[epoch ${epoch.id}] attempt ${attempt}: verify`);
       const verifyResult = await runVerify({
-        config,
-        factorio,
+        controller,
         epoch,
         plan: designResult.plan,
         modules,
@@ -270,9 +237,9 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       if (verdict.pass) {
         // Reload clean world from input save for final execute (no harness)
         log(`[epoch ${epoch.id}] attempt ${attempt}: execute (clean save)`);
-        await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+        await controller.loadSave(inputSave);
         exResult = await runExecute({
-          config,
+          controller,
           epoch,
           plan: designResult.plan,
           modules,
@@ -285,7 +252,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
         // Observe: measure the clean save without harness (same meter as verify)
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
         observeVerdict = await runAudit({
-          config,
+          controller,
           targetMetric: epoch.target_metric,
           successCriteria: epoch.success_criteria,
           outDir: candDir,
@@ -671,8 +638,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
   try {
     log(`[epoch ${epoch.id}] [${cid}] verify (slot ${slot.index})`);
     const verifyResult = await runVerify({
-      config: slot.config,
-      factorio: slot.factorio,
+      controller: slot.controller,
       epoch,
       plan: designResult.plan,
       modules,
@@ -694,10 +660,10 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
 
     if (verdict.pass) {
       // Reload clean world from input save for final execute (no harness)
-      await ensureFactorioStartedFromSave({ factorio: slot.factorio, savePath: inputSave });
+      await slot.controller.loadSave(inputSave);
       log(`[epoch ${epoch.id}] [${cid}] execute (clean save, slot ${slot.index})`);
       const exResult = await runExecute({
-        config: slot.config,
+        controller: slot.controller,
         epoch,
         plan: designResult.plan,
         modules,
@@ -711,7 +677,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
       // Observe: measure the clean save without harness
       log(`[epoch ${epoch.id}] [${cid}] observe`);
       const observeVerdict = await runAudit({
-        config: slot.config,
+        controller: slot.controller,
         targetMetric: epoch.target_metric,
         successCriteria: epoch.success_criteria,
         outDir: candDir,
@@ -740,6 +706,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
 
 async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
+  const controller = new FactorioController(factorio, config);
   const inputSave = resolveInputSave(config, epoch.input_save);
   const n = config.parallelCandidates;
   log(`[epoch ${epoch.id}] parallel mode: ${n} candidates, benchmark audit`);
@@ -753,7 +720,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
 
   // Probe: single instance (the factorio passed in from run-epoch.js).
   log(`[epoch ${epoch.id}] phase 1: probe`);
-  await ensureFactorioStartedFromSave({ factorio, savePath: inputSave });
+  await controller.loadSave(inputSave);
   const probeResult = await runProbe({
     config,
     epoch,
@@ -763,7 +730,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
   // Stop probe instance — pool manages everything from here.
-  await factorio.stop();
+  await controller.stop();
 
   // Parallel design + dry-validate (no live Factorio needed).
   log(`[epoch ${epoch.id}] launching ${n} parallel designs…`);
@@ -872,7 +839,10 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
 
 export async function runEpoch({ config, factorio, epoch }) {
   const log = (msg) => console.log(msg);
-  if (epoch.kind === "bootstrap") return runBootstrapEpoch({ config, factorio, epoch, log });
+  if (epoch.kind === "bootstrap") {
+    const controller = new FactorioController(factorio, config);
+    return runBootstrapEpoch({ controller, config, epoch, log });
+  }
   if (epoch.kind === "composition") {
     if (config.parallelCandidates > 1) {
       return runParallelCompositionEpoch({ config, factorio, epoch, log });

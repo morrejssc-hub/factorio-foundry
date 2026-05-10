@@ -6,87 +6,14 @@
 //
 // Critical invariant: this module never invokes `pi`. Auditor must be
 // deterministic so the multi-branch and multi-run comparisons are valid.
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { rconExec, buildLuaCommand } from "../rcon.js";
 import { resolveAudit } from "./audit-resolver.js";
 import {
   evaluateCriteria, validateCriteria, coerceLegacyCriteria, headlineThreshold,
 } from "./success-criteria.js";
 
 const TICKS_PER_SECOND = 60;
-const ENTITY_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
-
-async function rconCountEntities(config) {
-  const command = `/silent-command rcon.print(#game.surfaces[1].find_entities())`;
-  const body = await rconExec({
-    host: config.rconHost, port: config.rconPort,
-    password: config.rconPassword, command, timeoutMs: 10000,
-  });
-  return parseInt(body.trim(), 10) || 0;
-}
-
-async function rconCountEntitiesByName({ config, name, surface = "nauvis" }) {
-  // Reject anything that doesn't look like a Factorio prototype id so we
-  // can't be tricked into injecting Lua via a crafted criterion name.
-  if (!ENTITY_NAME_RE.test(name)) {
-    throw new Error(`refusing to query entity name with unsafe chars: ${JSON.stringify(name)}`);
-  }
-  if (!ENTITY_NAME_RE.test(surface)) {
-    throw new Error(`refusing to query surface with unsafe chars: ${JSON.stringify(surface)}`);
-  }
-  const command = `/silent-command rcon.print(#game.surfaces["${surface}"].find_entities_filtered{name="${name}"})`;
-  const body = await rconExec({
-    host: config.rconHost, port: config.rconPort,
-    password: config.rconPassword, command, timeoutMs: 10000,
-  });
-  const n = parseInt(body.trim(), 10);
-  return Number.isFinite(n) ? n : 0;
-}
-
-async function rconRunScript({ config, scriptPath, params }) {
-  const lua = await readFile(scriptPath, "utf8");
-  const command = buildLuaCommand(scriptPath.split("/").pop(), lua, params);
-  const body = await rconExec({
-    host: config.rconHost,
-    port: config.rconPort,
-    password: config.rconPassword,
-    command,
-    timeoutMs: 15000,
-  });
-  let parsed;
-  try {
-    parsed = JSON.parse(body.trim());
-  } catch (error) {
-    throw new Error(`audit script returned non-JSON: ${body.slice(0, 200)}`);
-  }
-  // `ok` semantics: true ⇒ the snapshot read succeeded. The runner — not
-  // the script — decides pass/fail via success_criteria. Some authored
-  // scripts conflate ok with "passes threshold" (e.g. set ok = measured
-  // >= min_kw); when that happens we still have a valid `measured`, so
-  // accept the read instead of treating it as a script error.
-  if (parsed.ok === false && typeof parsed.measured !== "number" && typeof parsed.cumulative_produced !== "number") {
-    throw new Error(`audit script failed: ${parsed.error || "unknown"}`);
-  }
-  return parsed;
-}
-
-async function waitTicks({ config, ticks }) {
-  // Use the factorio-server HTTP /tool/factorio_action wait_ticks endpoint
-  // so the Factorio process advances simulation time while we wait.
-  const timeoutMs = Math.ceil((ticks / TICKS_PER_SECOND) * 1000) + 60_000;
-  const response = await fetch(`${config.serviceUrl}/tool/factorio_action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "wait_ticks", ticks }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    throw new Error(`wait_ticks failed: ${payload.error || response.statusText}`);
-  }
-  return payload.result;
-}
 
 function readMeasured(snapshot) {
   if (typeof snapshot.measured === "number") return snapshot.measured;
@@ -94,9 +21,21 @@ function readMeasured(snapshot) {
   throw new Error("audit script must return numeric `measured` (or legacy `cumulative_produced`)");
 }
 
+// Same `ok === false` semantics that the old in-file rconRunScript enforced:
+// the script may return `ok=false` while still returning a usable measured
+// value (some authored scripts conflate ok with "passes threshold"). Only
+// throw when the read truly produced nothing usable.
+function assertSnapshotUsable(snap) {
+  if (snap && snap.ok === false
+      && typeof snap.measured !== "number"
+      && typeof snap.cumulative_produced !== "number") {
+    throw new Error(`audit script failed: ${snap.error || "unknown"}`);
+  }
+}
+
 /**
  * @param {object} args
- * @param {object} args.config         — loaded foundry config
+ * @param {object} args.controller     — FactorioController (rcon + advanceTicks + runLuaScript + countEntities)
  * @param {object} args.targetMetric   — see audit-resolver.js for the 3 supported shapes
  * @param {Array<object>} [args.successCriteria] — epoch.success_criteria; if absent,
  *        a legacy `target_metric.threshold` is auto-converted to a single
@@ -109,11 +48,11 @@ function readMeasured(snapshot) {
  * @returns {Promise<object>}
  */
 export async function runAudit({
-  config, targetMetric, outDir, modules, plan, stagedDir, successCriteria,
+  controller, targetMetric, outDir, modules, plan, stagedDir, successCriteria,
 }) {
   const resolved = resolveAudit({
     targetMetric, modules, plan, stagedDir,
-    rootDir: config.rootDir,
+    rootDir: controller.config.rootDir,
   });
   const { scriptPath, params, aggregate, metric, item, moduleId, auditId } = resolved;
   const windowTicks = params.window_ticks ?? 3600;
@@ -128,15 +67,18 @@ export async function runAudit({
   const auditStart = Date.now();
   let before = null, after;
   if (aggregate === "snapshot_post") {
-    await waitTicks({ config, ticks: windowTicks });
-    after = await rconRunScript({ config, scriptPath, params });
+    await controller.advanceTicks(windowTicks);
+    after = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(after);
   } else {
-    before = await rconRunScript({ config, scriptPath, params });
-    await waitTicks({ config, ticks: windowTicks });
-    after = await rconRunScript({ config, scriptPath, params });
+    before = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(before);
+    await controller.advanceTicks(windowTicks);
+    after = await controller.runLuaScript(scriptPath, params);
+    assertSnapshotUsable(after);
   }
   const wall_clock_ms = Date.now() - auditStart;
-  const entity_count = await rconCountEntities(config).catch(() => null);
+  const entity_count = await controller.countEntities().catch(() => null);
 
   const tickDelta = before ? (after.tick - before.tick) : windowTicks;
   const seconds = tickDelta / TICKS_PER_SECOND;
@@ -158,7 +100,7 @@ export async function runAudit({
     metric,
     snapshot: after || null,
     executeOk: true, // we only reach audit if execute didn't throw
-    countEntities: (name) => rconCountEntitiesByName({ config, name }),
+    countEntities: (name) => controller.countEntitiesByName({ name }),
   };
   const { pass, results: criteriaResults } = await evaluateCriteria(criteria, ctx);
 

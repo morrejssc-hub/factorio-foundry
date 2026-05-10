@@ -7,6 +7,7 @@ import { FactorioServer } from "../factorio-server.js";
 import { FactorioApiDocs } from "../factorio-api-docs.js";
 import { FactorioWiki } from "../factorio-wiki.js";
 import { createApi } from "../http-api.js";
+import { FactorioController } from "./factorio-controller.js";
 
 const PORT_STRIDE = 10;
 
@@ -50,6 +51,7 @@ export class InstancePool {
       index: i,
       config: slotConfig(baseConfig, i),
       factorio: null,
+      controller: null,
       api: null,
     }));
     this._available = [];
@@ -90,6 +92,7 @@ export class InstancePool {
         await factorio.start();
 
         slot.factorio = factorio;
+        slot.controller = new FactorioController(factorio, config);
         slot.api = api;
       }));
     } catch (err) {
