@@ -1,19 +1,15 @@
-// verify.js — Unified verify phase. Owns the entire pipeline from static
-// validation through winner save export:
+// verify.js — candidate placement plus harness-gated verification.
 //
 //   1. dry-validate
 //   2. place modules (with auto-clear retry; proposal.json on failure)
 //   3. routeConnections                       (proposal.json on failure)
-//   4. snapshot("pre-harness")                ← clean post-execute state
-//   5. place item harness + power harness
-//   6. meter window via runMeterWindow (drives harness_tick every 600 ticks)
-//   7. on pass: rollback("pre-harness") → exportZip(savePathOut)
+//   4. place item harness + power harness
+//   5. meter window via runMeterWindow (drives harness_tick every 600 ticks)
 //
-// The snapshot+rollback flip removed the old "verify dirties a fork →
-// epoch.js reloads input save → runExecute re-places everything" dance.
-// The clean snapshot taken at step 4 IS the winner save (pre-harness, all
-// placements + connections in place); we just rewind to it after the meter
-// window and dump it to disk. No second placement pass, no harness teardown.
+// runVerifyGate is the current hot path: it runs on disposable verifier
+// instances, so harness pollution is discarded with the clone. runVerify is
+// kept as a compatibility wrapper for older callers that still expect
+// snapshot -> rollback -> export behavior.
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -104,20 +100,22 @@ async function writeProposal(outDir, proposal) {
  * @param {string} [args.savePathOut]  — destination zip for the winner save (pass-only)
  * @returns {Promise<{verdict: object, perPlacement: object[], savePath: ?string}>}
  */
-export async function runVerify({
-  controller, epoch, plan, modules, outDir, savePathOut,
+export async function applyCandidate({
+  controller, plan, modules, outDir, dryValidate = true,
 }) {
   await mkdir(outDir, { recursive: true });
 
-  // Step 1: static validation
-  const dryResult = await runDryValidate({ plan, modules, outDir });
-  if (!dryResult.ok) {
-    throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
+  let dryResult = null;
+  if (dryValidate) {
+    dryResult = await runDryValidate({ plan, modules, outDir });
+    if (!dryResult.ok) {
+      throw new Error(`dry-validate: ${dryResult.errors.join("; ")}`);
+    }
   }
 
-  // Step 2: place modules (reuse execute.js helpers). On failure we write
+  // Place modules (reuse execute.js helpers). On failure we write
   // proposal.json so the recovery loop's next design call sees a focused
-  // root_cause + suggested_changes record (designer-history.yaml plumbing).
+  // root_cause + suggested_changes record (designer-history.md plumbing).
   await runPreparation({ controller, plan, log: () => {} });
   const perPlacement = [];
   for (const placement of plan.placements) {
@@ -149,12 +147,12 @@ export async function runVerify({
     throw connError;
   }
 
-  // Step 4: snapshot the clean post-placement world. This IS the winner
-  // save; if the meter window passes we rollback to it and dump it to disk
-  // at savePathOut.
-  await controller.snapshot("pre-harness");
+  return { dryResult, perPlacement };
+}
 
-  // Step 5: place item harness (taps belts + inventory ports for measurement).
+export async function runHarnessGate({
+  controller, epoch, plan, modules, outDir, stagedDir,
+}) {
   const harnessManifest = deriveHarnessManifest(plan, modules);
   let placedHarnessManifest = [];
   if (harnessManifest.length > 0) {
@@ -178,7 +176,7 @@ export async function runVerify({
     targetMetric: epoch.target_metric,
     modules,
     plan,
-    stagedDir: outDir.replace(/\/execute$/, "") + "/staged-modules",
+    stagedDir: stagedDir ?? outDir.replace(/\/execute$/, "") + "/staged-modules",
     rootDir: controller.config.rootDir,
     successCriteria: epoch.success_criteria,
     outDir,
@@ -187,6 +185,54 @@ export async function runVerify({
     onAdvance: placedHarnessManifest.length > 0
       ? async () => { await controller.action("harness_tick", { manifest: placedHarnessManifest }); }
       : undefined,
+  });
+  return verdict;
+}
+
+export async function runVerifyGate({
+  controller, epoch, plan, modules, outDir, stagedDir,
+}) {
+  const { dryResult, perPlacement } = await applyCandidate({
+    controller,
+    plan,
+    modules,
+    outDir,
+    dryValidate: true,
+  });
+  const verdict = await runHarnessGate({
+    controller,
+    epoch,
+    plan,
+    modules,
+    outDir,
+    stagedDir,
+  });
+  return { dryResult, perPlacement, verdict };
+}
+
+export async function runVerify({
+  controller, epoch, plan, modules, outDir, savePathOut, stagedDir,
+}) {
+  const { dryResult, perPlacement } = await applyCandidate({
+    controller,
+    plan,
+    modules,
+    outDir,
+    dryValidate: true,
+  });
+
+  // Snapshot the clean post-placement world. This IS the winner save; if
+  // the meter window passes this compatibility path rolls back to it and
+  // dumps it to disk at savePathOut.
+  await controller.snapshot("pre-harness");
+
+  const verdict = await runHarnessGate({
+    controller,
+    epoch,
+    plan,
+    modules,
+    outDir,
+    stagedDir,
   });
 
   // Step 7: on pass, rewind to the clean snapshot and export the winner zip.
@@ -203,5 +249,5 @@ export async function runVerify({
     await writeFile(resolve(outDir, "verify.json"), JSON.stringify(verdict, null, 2), "utf8");
   }
 
-  return { verdict, perPlacement, savePath };
+  return { dryResult, verdict, perPlacement, savePath };
 }

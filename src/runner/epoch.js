@@ -12,7 +12,7 @@ import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
-import { runVerify } from "./verify.js";
+import { applyCandidate, runVerifyGate } from "./verify.js";
 import { runObserve } from "./observe.js";
 import { InstancePool } from "./instance-pool.js";
 import { FactorioController } from "./factorio-controller.js";
@@ -23,6 +23,7 @@ import {
 } from "./run-layout.js";
 import { pickWinner } from "./select-winner.js";
 import { worldMdPath, appendDeployedModule } from "./world-md.js";
+import { exists } from "../fs-util.js";
 
 // dry-validate failures are spatial/recipe/inventory mistakes that the LLM
 // can fix from prompt feedback alone — no Factorio simulation needed. They
@@ -31,11 +32,54 @@ import { worldMdPath, appendDeployedModule } from "./world-md.js";
 const MAX_DRY_VALIDATE_RETRIES = 3;
 
 export async function loadEpoch(epochsDir, epochId) {
-  const path = resolve(epochsDir, `${epochId}.yaml`);
+  const mdPath = resolve(epochsDir, `${epochId}.md`);
+  const yamlPath = resolve(epochsDir, `${epochId}.yaml`);
+  const path = await exists(mdPath) ? mdPath : yamlPath;
   const text = await readFile(path, "utf8");
-  const parsed = parseYaml(text);
+  let parsed;
+  if (path.endsWith(".md")) {
+    const fm = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (!fm) {
+      throw new Error(`invalid epoch.md frontmatter in ${path}`);
+    }
+    parsed = parseYaml(fm[1]) || {};
+    const body = fm[2].trim();
+    if (body) parsed.goal = body;
+  } else {
+    parsed = parseYaml(text);
+  }
   parsed._path = path;
   return parsed;
+}
+
+function renderDesignerHistoryMd(historyEntries) {
+  const frontmatter = stringifyYaml({ attempts: historyEntries }).trimEnd();
+  return `---\n${frontmatter}\n---\n\n# Designer History\n\nCross-attempt history used by the design phase retry prompt.\n`;
+}
+
+async function replayObserveExport({
+  controller, epoch, plan, modules, outDir, executeOut, stagedDir,
+  savePathOut, log,
+}) {
+  const applied = await applyCandidate({
+    controller,
+    plan,
+    modules,
+    outDir: executeOut,
+    dryValidate: false,
+  });
+  const observeVerdict = await runObserve({
+    controller,
+    targetMetric: epoch.target_metric,
+    successCriteria: epoch.success_criteria,
+    outDir,
+    modules,
+    plan,
+    stagedDir,
+  });
+  const savePath = await controller.exportZip(savePathOut);
+  log(`[epoch ${epoch.id}] winner replay exported — ${savePath}`);
+  return { observeVerdict, savePath, perPlacement: applied.perPlacement };
 }
 
 async function stockWorkerInventory(controller, items) {
@@ -122,21 +166,27 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
   });
   log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
-  // Recovery loop: design → dry-validate → verify → observe, with the
-  // world reset to input_save before each retry so each attempt starts
-  // from the same blank slate. previousAttempts is fed to design so the
-  // next LLM call sees a focused brief on what already failed.
+  const gatePool = new InstancePool(config, 1);
+  log(`[epoch ${epoch.id}] initializing verifier clone…`);
+  await gatePool.init(inputSave);
+
+  // Recovery loop: design → dry-validate → cloned verify gate. The primary
+  // instance stays on input_save until a winner is replayed for observe/export.
+  // previousAttempts is fed to design so the next LLM call sees a focused
+  // brief on what already failed.
   const previousAttempts = [];
   const attemptRecords = [];
   let winning = null;
   let lastVerdict = null;
-  const historyPath = join(runDir, "designer-history.yaml");
+  let primaryNeedsReset = false;
+  const historyPath = join(runDir, "designer-history.md");
   const historyEntries = [];
 
   async function flushHistory() {
-    await writeFile(historyPath, stringifyYaml({ attempts: historyEntries }), "utf8");
+    await writeFile(historyPath, renderDesignerHistoryMd(historyEntries), "utf8");
   }
 
+  try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const cid = candidateId(attempt - 1);
     const candDir = candidateDir(runDir, cid);
@@ -146,9 +196,10 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     const executeOut = join(candDir, "execute");
     const candidateSavePath = runSavePath(saveDir, runTs, cid);
 
-    if (attempt > 1) {
-      log(`[epoch ${epoch.id}] retry attempt ${attempt}/${maxAttempts} — resetting world to input_save`);
+    if (primaryNeedsReset) {
+      log(`[epoch ${epoch.id}] retry attempt ${attempt}/${maxAttempts} — resetting primary to input_save`);
       await controller.loadSave(inputSave);
+      primaryNeedsReset = false;
     }
 
     let designResult, modules, dryResult, exResult, verdict, observeVerdict;
@@ -221,37 +272,46 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       }
 
       log(`[epoch ${epoch.id}] attempt ${attempt}: verify`);
-      const verifyResult = await runVerify({
-        controller,
-        epoch,
-        plan: designResult.plan,
-        modules,
-        outDir: executeOut,
-        savePathOut: candidateSavePath,
-      });
+      const slot = await gatePool.acquire();
+      let verifyResult;
+      try {
+        if (slot._foundryDirty) {
+          log(`[epoch ${epoch.id}] attempt ${attempt}: resetting verifier clone`);
+          await slot.controller.loadSave(inputSave);
+          slot._foundryDirty = false;
+        }
+        verifyResult = await runVerifyGate({
+          controller: slot.controller,
+          epoch,
+          plan: designResult.plan,
+          modules,
+          outDir: executeOut,
+          stagedDir,
+        });
+      } finally {
+        slot._foundryDirty = true;
+        gatePool.release(slot);
+      }
       verdict = verifyResult.verdict;
       log(`[epoch ${epoch.id}] attempt ${attempt}: verify ok — pass=${verdict.pass} measured=${verdict.measured} threshold=${verdict.threshold}`);
       lastVerdict = verdict;
 
       if (verdict.pass) {
-        // Verify already exported the winner save via snapshot+rollback;
-        // no separate execute pass needed. Mirror the old exResult shape
-        // so attemptRecords / promoteWinner consumers stay unchanged.
-        exResult = { savePath: verifyResult.savePath, perPlacement: verifyResult.perPlacement };
-        log(`[epoch ${epoch.id}] attempt ${attempt}: save exported — ${exResult.savePath}`);
-
-        // Observe: measure the clean save without harness (same meter as verify)
-        log(`[epoch ${epoch.id}] attempt ${attempt}: observe`);
-        observeVerdict = await runObserve({
+        log(`[epoch ${epoch.id}] attempt ${attempt}: winner replay on primary`);
+        const replay = await replayObserveExport({
           controller,
-          targetMetric: epoch.target_metric,
-          successCriteria: epoch.success_criteria,
-          outDir: candDir,
-          modules,
+          epoch,
           plan: designResult.plan,
+          modules,
+          outDir: candDir,
+          executeOut,
           stagedDir,
+          savePathOut: candidateSavePath,
+          log,
         });
+        observeVerdict = replay.observeVerdict;
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
+        exResult = { savePath: replay.savePath, perPlacement: replay.perPlacement };
         winning = { designResult, modules, exResult, verdict, observeVerdict, stagedDir, attempt };
       } else {
         previousAttempts.push({
@@ -290,6 +350,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
       try {
         executorProposal = JSON.parse(await readFile(join(executeOut, "proposal.json"), "utf8"));
       } catch { /* no proposal (failure before execute, or execute didn't write one) — proceed */ }
+      if (verdict?.pass) primaryNeedsReset = true;
       previousAttempts.push({
         attempt,
         plan: designResult?.plan,
@@ -348,6 +409,9 @@ async function runCompositionEpoch({ config, factorio, epoch, log }) {
     });
 
     if (winning) break;
+  }
+  } finally {
+    await gatePool.shutdown();
   }
 
   const actualAttempts = winning ? winning.attempt : attemptRecords.length;
@@ -604,7 +668,7 @@ async function runOneDesign(idx, { config, epoch, probeResult, runDir, log }) {
   return { idx, cid, candDir, designOut, stagedDir, designResult, modules, dryResult, designError };
 }
 
-async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult, inputSave }) {
+async function runOneExecuteAudit(design, { config, epoch, pool, saveDir, runTs, log, inputSave }) {
   const { idx, cid, candDir, designOut, stagedDir, designResult, modules, designError } = design;
   const candidateSavePath = runSavePath(saveDir, runTs, cid);
   const executeOut = join(candDir, "execute");
@@ -628,13 +692,13 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
   const slot = await pool.acquire();
   try {
     log(`[epoch ${epoch.id}] [${cid}] verify (slot ${slot.index})`);
-    const verifyResult = await runVerify({
+    const verifyResult = await runVerifyGate({
       controller: slot.controller,
       epoch,
       plan: designResult.plan,
       modules,
       outDir: executeOut,
-      savePathOut: candidateSavePath,
+      stagedDir,
     });
     const verdict = verifyResult.verdict;
     record.verify = {
@@ -650,31 +714,7 @@ async function runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir
     log(`[epoch ${epoch.id}] [${cid}] verify ok — pass=${verdict.pass} measured=${verdict.measured}`);
 
     if (verdict.pass) {
-      // Verify already exported the winner save via snapshot+rollback;
-      // no separate execute pass needed.
-      record.execute = { ok: true, save_path: verifyResult.savePath };
-      log(`[epoch ${epoch.id}] [${cid}] save exported — ${verifyResult.savePath}`);
-
-      // Observe: measure the clean save without harness
-      log(`[epoch ${epoch.id}] [${cid}] observe`);
-      const observeVerdict = await runObserve({
-        controller: slot.controller,
-        targetMetric: epoch.target_metric,
-        successCriteria: epoch.success_criteria,
-        outDir: candDir,
-        modules,
-        plan: designResult.plan,
-        stagedDir,
-      });
-      log(`[epoch ${epoch.id}] [${cid}] observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
-      record.observe = {
-        pass: observeVerdict.pass,
-        measured: observeVerdict.measured,
-        threshold: observeVerdict.threshold,
-        item: observeVerdict.item,
-        seconds_actual: observeVerdict.seconds_actual,
-        produced_delta: observeVerdict.produced_delta,
-      };
+      record.execute = { ok: true, save_path: null };
     }
   } catch (err) {
     record.error = err.message;
@@ -710,9 +750,6 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   });
   log(`[epoch ${epoch.id}] probe ok — tick=${probeResult.state.tick}` + (probeResult.cacheHit ? " (cache hit)" : ""));
 
-  // Stop probe instance — pool manages everything from here.
-  await controller.stop();
-
   // Parallel design + dry-validate (no live Factorio needed).
   log(`[epoch ${epoch.id}] launching ${n} parallel designs…`);
   const designs = await Promise.all(
@@ -726,7 +763,8 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
 
   let attemptRecords;
   try {
-    // Parallel verify + execute + observe.
+    // Parallel cloned verify gate. Candidate worlds are disposable; the
+    // primary instance replays only the selected winner for observe/export.
     log(`[epoch ${epoch.id}] running ${n} candidates in parallel…`);
     attemptRecords = await Promise.all(
       designs.map((design) => runOneExecuteAudit(design, { config, epoch, pool, runDir, saveDir, runTs, log, probeResult, inputSave })),
@@ -736,7 +774,9 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   }
 
   const selection = pickWinner(attemptRecords, epoch.optimize);
-  const winningRecord = attemptRecords.find((r) => r.verify?.pass);
+  const winningRecord = selection.winnerId
+    ? attemptRecords.find((r) => r.candidate === selection.winnerId)
+    : null;
 
   const historyEntries = designs.map((d) => ({
     attempt: d.idx + 1,
@@ -746,14 +786,40 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
     expected_throughput: d.designResult?.plan?.expected_throughput ?? null,
     error: d.designError ?? null,
   }));
-  await writeFile(join(runDir, "designer-history.yaml"), stringifyYaml({ attempts: historyEntries }), "utf8");
+  await writeFile(join(runDir, "designer-history.md"), renderDesignerHistoryMd(historyEntries), "utf8");
 
   if (winningRecord) {
+    const winDesign = designs.find((d) => d.idx === winningRecord.attempt - 1);
+    if (!winDesign?.designResult?.plan) {
+      throw new Error(`winner ${winningRecord.candidate} missing design plan`);
+    }
+    log(`[epoch ${epoch.id}] winner → ${winningRecord.candidate}; replaying on primary`);
+    await controller.loadSave(inputSave);
+    const replay = await replayObserveExport({
+      controller,
+      epoch,
+      plan: winDesign.designResult.plan,
+      modules: winDesign.modules,
+      outDir: winningRecord.candidateDir,
+      executeOut: winningRecord.executeOut,
+      stagedDir: winDesign.stagedDir,
+      savePathOut: winningRecord.candidateSavePath,
+      log,
+    });
+    winningRecord.execute = { ok: true, save_path: replay.savePath };
+    winningRecord.observe = {
+      pass: replay.observeVerdict.pass,
+      measured: replay.observeVerdict.measured,
+      threshold: replay.observeVerdict.threshold,
+      item: replay.observeVerdict.item,
+      seconds_actual: replay.observeVerdict.seconds_actual,
+      produced_delta: replay.observeVerdict.produced_delta,
+    };
+
     await promoteWinner(winningRecord.candidateSavePath, winnerPath);
     log(`[epoch ${epoch.id}] winner → ${winningRecord.candidate} promoted to ${winnerPath}`);
 
     // Promote staged modules from winning candidate's design.
-    const winDesign = designs.find((d) => d.idx === winningRecord.attempt - 1);
     if (winDesign?.designResult?.authored?.length) {
       await promoteStagedModules({
         config,

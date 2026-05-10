@@ -1,6 +1,6 @@
 epoch: e_test_proposal-loop
 placements:
-  - { id: p0, module: coal-burner-cell, anchor: { x: -78, y: -13 }, direction: north }
+  - { id: p0, module: coal-burner-cell, anchor: { x: 108, y: 38 }, direction: north }
   - { id: p1, module: far-sink, anchor: { x: 50, y: 0 }, direction: north }
 connections:
   - { from: p0.coal_belt, to: p1.far_in, required_throughput: 0.18 }

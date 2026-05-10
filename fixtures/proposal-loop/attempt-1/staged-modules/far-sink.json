@@ -4,6 +4,5 @@
   "description": "Test fixture: a single iron-chest with a port at rel_pos (2000, 0) so route_belt cannot reach it.",
   "entities": [
     { "key": "chest", "item": "iron-chest", "dx": 0, "dy": 0, "direction": "north" }
-  ],
-  "fuel": []
+  ]
 }
