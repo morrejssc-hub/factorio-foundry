@@ -5,10 +5,10 @@
 //     starter inventory. No probe / design / verify / observe phases.
 //   - composition: full pipeline (probe → design → dry-validate → verify →
 //     observe). Operates on an input save, produces an output save.
-import { mkdir, copyFile, readFile, writeFile, readdir, rm } from "node:fs/promises";
+import { mkdir, copyFile, readFile, writeFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { loadAllModules, loadAllModulesWithStaged } from "../lib-loader.js";
+import { loadAllModulesWithStaged } from "../lib-loader.js";
 import { runProbe } from "./probe.js";
 import { runDesign } from "./design.js";
 import { runDryValidate } from "./dry-validate.js";
