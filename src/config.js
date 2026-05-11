@@ -33,6 +33,14 @@ function envPath(name, fallback) {
   return resolve(rootDir, process.env[name] || fallback);
 }
 
+function envRequired(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} environment variable is required`);
+  }
+  return value;
+}
+
 export function loadConfig() {
   const runtimeDir = envPath("FACTORIO_RUNTIME_DIR", "runtime");
   // factorio-server.js was written against an "agentWorkspace" with subdirs
@@ -61,7 +69,7 @@ export function loadConfig() {
     saveName: process.env.FACTORIO_SAVE_NAME || "main.zip",
     rconHost: process.env.FACTORIO_RCON_HOST || "127.0.0.1",
     rconPort: envInt("FACTORIO_RCON_PORT", 27016),
-    rconPassword: process.env.FACTORIO_RCON_PASSWORD || "factorio-foundry",
+    rconPassword: envRequired("FACTORIO_RCON_PASSWORD"),
     gamePort: envInt("FACTORIO_GAME_PORT", 34197),
     allowMutationWithConnectedPlayers: envBool("FACTORIO_AGENT_ALLOW_MUTATION_WITH_CONNECTED_PLAYERS", true),
     materialPolicy: envEnum("FACTORIO_AGENT_MATERIAL_POLICY", "strict", ["strict", "virtual"]),
