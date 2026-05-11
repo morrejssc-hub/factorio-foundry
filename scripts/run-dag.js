@@ -1,30 +1,24 @@
 #!/usr/bin/env node
-// run-dag.js — Run epochs in DAG topological order.
+// run-dag.js — Run epochs in DAG topological order with graph-backed state.
 //
 //   node scripts/run-dag.js [--from <epoch-id>] [--to <epoch-id>] [--force]
+//                           [--from-artifact <artifact-id>]
 //                           [--parallel <N>] [--dry-run]
 //
-// Reads epochs/dag.yaml, resolves topological order, and runs each epoch
-// in sequence using the same Factorio service instance. Epochs whose
-// output_save already exists on disk are skipped (unless --force is given).
-//
-// --from <id>      start from this epoch (and its transitive dependents)
-// --to <id>        stop after this epoch
-// --force          re-run even if output_save already exists
-// --parallel <N>   pass through to each epoch
-// --dry-run        print the planned execution order and exit without running
-import { resolve } from "node:path";
-import { readFile, access } from "node:fs/promises";
-import { parse as parseYaml } from "yaml";
+// Skipping is based on state/graph/refs.json selected artifacts, not on
+// output_save files. Legacy input_save remains the fallback when graph has no
+// selected artifact for an epoch dependency.
 import { bootFactorioService } from "../src/factorio-process.js";
-import { loadEpoch, runEpoch } from "../src/runner/epoch.js";
+import { loadConfig } from "../src/config.js";
+import { FoundryController } from "../src/runner/foundry-controller.js";
 
 function parseArgs(argv) {
   const args = argv.slice(2);
-  const out = { from: null, to: null, force: false, dryRun: false };
+  const out = { from: null, to: null, fromArtifactId: null, force: false, dryRun: false };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--from") out.from = args[++i];
     else if (args[i] === "--to") out.to = args[++i];
+    else if (args[i] === "--from-artifact") out.fromArtifactId = args[++i];
     else if (args[i] === "--force") out.force = true;
     else if (args[i] === "--dry-run") out.dryRun = true;
     else if (args[i] === "--parallel") {
@@ -42,108 +36,104 @@ function parseArgs(argv) {
   return out;
 }
 
-function topoSort(nodes) {
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const visited = new Set();
-  const result = [];
-  function visit(id) {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const node = byId.get(id);
-    if (!node) return;
-    for (const dep of (node.depends_on || [])) visit(dep);
-    result.push(node);
-  }
-  for (const node of nodes) visit(node.id);
-  return result;
+function describeInput(input) {
+  if (!input || input.source === "none") return "input=none";
+  const artifact = input.artifactId ? ` artifact=${input.artifactId}` : "";
+  return `input=${input.path} source=${input.source}${artifact}`;
 }
 
-// Inclusive slice: keep nodes from `from` to `to` in topo order.
-// If `from` is set, also include all dependencies needed to reach it.
-function filterRange(ordered, fromId, toId) {
-  let fromIdx = fromId ? ordered.findIndex((n) => n.id === fromId) : 0;
-  let toIdx   = toId   ? ordered.findIndex((n) => n.id === toId)   : ordered.length - 1;
-  if (fromId && fromIdx === -1) {
-    console.error(`--from epoch "${fromId}" not found in DAG`);
-    process.exit(2);
-  }
-  if (toId && toIdx === -1) {
-    console.error(`--to epoch "${toId}" not found in DAG`);
-    process.exit(2);
-  }
-  if (fromIdx > toIdx) {
-    console.error(`--from "${fromId}" comes after --to "${toId}" in topological order`);
-    process.exit(2);
-  }
-  return ordered.slice(fromIdx, toIdx + 1);
-}
-
-async function exists(path) {
-  try { await access(path); return true; } catch { return false; }
+function describeSelected(step) {
+  return step.selectedArtifactId ? `selected=${step.selectedArtifactId}` : "selected=-";
 }
 
 const opts = parseArgs(process.argv);
 
-const dagPath = new URL("../epochs/dag.yaml", import.meta.url).pathname;
-const dag = parseYaml(await readFile(dagPath, "utf8"));
-const ordered = topoSort(dag.nodes || []);
-const plan = filterRange(ordered, opts.from, opts.to);
-
-console.log(`[run-dag] DAG: ${dag.id}`);
-console.log(`[run-dag] ${plan.length} epoch(s) in plan: ${plan.map((n) => n.id).join(" → ")}`);
-
 if (opts.dryRun) {
-  console.log("[run-dag] --dry-run: exiting without running");
+  const config = loadConfig();
+  const controller = new FoundryController({ config });
+  try {
+    const plan = await controller.planDag({
+      from: opts.from,
+      to: opts.to,
+      fromArtifactId: opts.fromArtifactId,
+    });
+    console.log(`[run-dag] DAG: ${plan.dag.id}`);
+    console.log(`[run-dag] ${plan.steps.length} epoch(s) in plan: ${plan.steps.map((step) => step.id).join(" -> ")}`);
+    for (const step of plan.steps) {
+      console.log(`[run-dag] dry ${step.id}: ${describeInput(step.input)} ${describeSelected(step)}`);
+    }
+    console.log("[run-dag] --dry-run: exiting without running");
+  } catch (error) {
+    console.error(`[run-dag] failed: ${error.message}`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 
 const { config, factorio, shutdown } = await bootFactorioService();
+const controller = new FoundryController({ config, factorio });
 console.log(`[run-dag] foundry HTTP service: ${config.serviceUrl}`);
 
 const results = [];
 let exitCode = 0;
 
 try {
-  for (const node of plan) {
-    const epoch = await loadEpoch(resolve(config.rootDir, "epochs"), node.id);
+  const plan = await controller.planDag({
+    from: opts.from,
+    to: opts.to,
+    fromArtifactId: opts.fromArtifactId,
+  });
+  console.log(`[run-dag] DAG: ${plan.dag.id}`);
+  console.log(`[run-dag] ${plan.steps.length} epoch(s) in plan: ${plan.steps.map((step) => step.id).join(" -> ")}`);
 
-    if (!opts.force && epoch.output_save) {
-      const savePath = resolve(config.rootDir, epoch.output_save);
-      if (await exists(savePath)) {
-        console.log(`[run-dag] skipping ${node.id}: output_save exists (use --force to re-run)`);
-        results.push({ id: node.id, status: "skipped" });
-        continue;
-      }
+  const resumeRun = !!opts.fromArtifactId;
+  for (const [index, step] of plan.steps.entries()) {
+    const selected = await controller.selectedArtifact(step.id);
+    if (!opts.force && !resumeRun && selected) {
+      console.log(`[run-dag] skipping ${step.id}: graph selected artifact exists (${selected.artifact_id}); use --force to re-run`);
+      results.push({ id: step.id, status: "skipped", selectedArtifactId: selected.artifact_id });
+      continue;
     }
 
-    console.log(`\n[run-dag] ── running epoch: ${node.id} ──`);
+    const input = await controller.resolveEpochInput({
+      epoch: step.epoch,
+      fromArtifactId: index === 0 ? opts.fromArtifactId : null,
+    });
+    console.log(`\n[run-dag] -- running epoch: ${step.id} --`);
+    console.log(`[run-dag] ${step.id}: ${describeInput(input)}`);
     const t0 = Date.now();
     try {
-      const result = await runEpoch({ config, factorio, epoch });
+      const result = await controller.runEpoch({
+        epoch: step.epoch,
+        fromArtifactId: index === 0 ? opts.fromArtifactId : null,
+      });
       const wall = ((Date.now() - t0) / 1000).toFixed(1);
       const status = result.ok ? "pass" : "fail";
-      console.log(`[run-dag] ${node.id}: ${status} in ${wall}s`);
-      results.push({ id: node.id, status, wall_s: +wall, result });
+      console.log(`[run-dag] ${step.id}: ${status} in ${wall}s graph_run=${result.graph?.runId}`);
+      results.push({ id: step.id, status, wall_s: +wall, result });
       if (!result.ok) {
-        console.error(`[run-dag] epoch ${node.id} did not pass — stopping DAG run`);
+        console.error(`[run-dag] epoch ${step.id} did not pass; stopping DAG run`);
         exitCode = 1;
         break;
       }
-    } catch (err) {
+    } catch (error) {
       const wall = ((Date.now() - t0) / 1000).toFixed(1);
-      console.error(`[run-dag] epoch ${node.id} threw after ${wall}s: ${err.message}`);
-      results.push({ id: node.id, status: "error", wall_s: +wall, error: err.message });
+      console.error(`[run-dag] epoch ${step.id} threw after ${wall}s: ${error.message}`);
+      results.push({ id: step.id, status: "error", wall_s: +wall, error: error.message });
       exitCode = 1;
       break;
     }
   }
+} catch (error) {
+  console.error(`[run-dag] failed: ${error.message}`);
+  exitCode = 1;
 } finally {
   await shutdown();
 }
 
-console.log("\n[run-dag] ── summary ──");
+console.log("\n[run-dag] -- summary --");
 for (const r of results) {
-  const icon = r.status === "pass" ? "✓" : r.status === "skipped" ? "–" : "✗";
+  const icon = r.status === "pass" ? "PASS" : r.status === "skipped" ? "SKIP" : "FAIL";
   const wall = r.wall_s != null ? ` (${r.wall_s}s)` : "";
   console.log(`  ${icon} ${r.id}${wall}`);
 }

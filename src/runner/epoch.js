@@ -138,16 +138,16 @@ async function runBootstrapEpoch({ controller, config, epoch, log }) {
   return { ok: true, savePath: out };
 }
 
-async function runCompositionEpoch({ config, factorio, epoch, log }) {
-  if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
+async function runCompositionEpoch({ config, factorio, epoch, log, inputSaveOverride = null, runDirOverride = null, runTsOverride = null }) {
+  if (!epoch.input_save && !inputSaveOverride) throw new Error(`composition epoch ${epoch.id} requires input_save`);
   const controller = new FactorioController(factorio, config);
-  const inputSave = resolveInputSave(config, epoch.input_save);
+  const inputSave = inputSaveOverride ? resolve(config.rootDir, inputSaveOverride) : resolveInputSave(config, epoch.input_save);
   const maxAttempts = Math.max(1, Number(epoch.recovery_attempts) || 1);
   log(`[epoch ${epoch.id}] starting from save ${inputSave}` + (maxAttempts > 1 ? ` (recovery_attempts=${maxAttempts})` : ""));
   await controller.loadSave(inputSave);
 
-  const runTs = new Date().toISOString().replace(/[:.]/g, "-");
-  const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
+  const runTs = runTsOverride || new Date().toISOString().replace(/[:.]/g, "-");
+  const runDir = runDirOverride || resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
   await mkdir(runDir, { recursive: true });
 
   const saveDir = epochSaveDir(config, epoch.id);
@@ -725,15 +725,15 @@ async function runOneExecuteAudit(design, { config, epoch, pool, saveDir, runTs,
   return record;
 }
 
-async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
-  if (!epoch.input_save) throw new Error(`composition epoch ${epoch.id} requires input_save`);
+async function runParallelCompositionEpoch({ config, factorio, epoch, log, inputSaveOverride = null, runDirOverride = null, runTsOverride = null }) {
+  if (!epoch.input_save && !inputSaveOverride) throw new Error(`composition epoch ${epoch.id} requires input_save`);
   const controller = new FactorioController(factorio, config);
-  const inputSave = resolveInputSave(config, epoch.input_save);
+  const inputSave = inputSaveOverride ? resolve(config.rootDir, inputSaveOverride) : resolveInputSave(config, epoch.input_save);
   const n = config.parallelCandidates;
   log(`[epoch ${epoch.id}] parallel mode: ${n} candidates`);
 
-  const runTs = new Date().toISOString().replace(/[:.]/g, "-");
-  const runDir = resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
+  const runTs = runTsOverride || new Date().toISOString().replace(/[:.]/g, "-");
+  const runDir = runDirOverride || resolve(config.rootDir, "plans", `${epoch.id}-${runTs}`);
   await mkdir(runDir, { recursive: true });
   const saveDir = epochSaveDir(config, epoch.id);
   await mkdir(saveDir, { recursive: true });
@@ -884,7 +884,7 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log }) {
   };
 }
 
-export async function runEpoch({ config, factorio, epoch }) {
+export async function runEpoch({ config, factorio, epoch, inputSaveOverride = null, runDirOverride = null, runTsOverride = null }) {
   const log = (msg) => console.log(msg);
   if (epoch.kind === "bootstrap") {
     const controller = new FactorioController(factorio, config);
@@ -892,9 +892,9 @@ export async function runEpoch({ config, factorio, epoch }) {
   }
   if (epoch.kind === "composition") {
     if (config.parallelCandidates > 1) {
-      return runParallelCompositionEpoch({ config, factorio, epoch, log });
+      return runParallelCompositionEpoch({ config, factorio, epoch, log, inputSaveOverride, runDirOverride, runTsOverride });
     }
-    return runCompositionEpoch({ config, factorio, epoch, log });
+    return runCompositionEpoch({ config, factorio, epoch, log, inputSaveOverride, runDirOverride, runTsOverride });
   }
   throw new Error(`unknown epoch.kind: ${epoch.kind}`);
 }

@@ -1,6 +1,8 @@
 node_modules/
 plans/
 state/saves/
+state/graph/
+state/archive/
 state/digests/
 state/cache/
 state/world.md
