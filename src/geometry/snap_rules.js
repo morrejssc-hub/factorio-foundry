@@ -4,7 +4,6 @@
 
 import { DIRECTION } from "./schema.js";
 import { rotateVec2, rotatedTileSize } from "./transform.js";
-import { entityFootprintTiles } from "./occupancy.js";
 
 const EPSILON = 1e-9;
 
