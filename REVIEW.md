@@ -17,14 +17,14 @@ The separation of concerns—Probe (read state), Design (plan offline), Dry-Vali
 
 ## 3. Identified Gaps & Weaknesses
 
-### 3.1. The "One-Shot" Placement and Routing Bottleneck
-Currently, the `design.js` phase requires the LLM to output both spatial `placements` and topological `connections` in a single `plan.yaml`.
-*   **The Problem:** LLMs are notoriously poor at spatial reasoning and precise pathfinding in complex grids. Forcing the LLM to guess the exact routing of belts between modules while simultaneously solving the macro-layout problem is a massive cognitive load. If the routing fails (`route_belt` fails during execute), the entire plan fails, burning a full, expensive `recovery_attempt` simulation cycle.
-*   **Symptom:** As noted, the Designer rarely connects belts correctly on the first attempt, leading to wasted simulation time and unnecessary retries for trivial routing fixes.
+### 3.1. The "One-Shot" Placement and Connection Bottleneck
+Currently, the `design.js` phase requires the LLM to output both spatial `placements` and topological `connections` (defining what connects to what) in a single `plan.yaml`.
+*   **The Problem:** Even though the runner handles the actual A* pathfinding for belts (`route_belt`), the LLM still has to perform macro-layout positioning and identify the correct topological pairings (`from` port to `to` port) simultaneously. This combined cognitive load frequently leads to mistakes where the LLM either forgets the connections or mis-pairs them on the first attempt.
+*   **Symptom:** As noted, the Designer rarely gets the connections right alongside the placements on the first attempt, leading to wasted simulation time and unnecessary retries to fix logical topology.
 
-### 3.2. Sequential vs. Parallel Feedback Parity
-As highlighted in `docs/todo.md`, there is a significant asymmetry in how feedback is handled.
-*   **The Problem:** In sequential mode, failures accumulate in `previousAttempts`, providing the LLM with a rich history of what went wrong (via `executor_proposal`). In parallel mode (`runParallelCompositionEpoch`), candidates run blindly and independently. If all parallel candidates fail a basic routing check, all that compute is wasted, and no shared learning occurs.
+### 3.2. Management of Parallel Failure Data
+Parallel mode (`runParallelCompositionEpoch`) correctly runs independent designers to find the best candidate. However, there is a gap in how failure data is managed.
+*   **The Problem:** While failure experiences are technically preserved in `pi-coding-agent` sessions and `.jsonl` files, there is a lack of unified aggregation and management for these failures. Since parallel mode drops failures instead of accumulating them in a structured way for the next attempt (unlike sequential mode's `previousAttempts`), valuable lessons about edge cases or impossible layouts are scattered and not easily utilized for broader agent learning.
 
 ### 3.3. Harness Brittleness in Complex Chains
 The Verify harness (via `verify.js` and `placeHarness`) works by injecting chests and bulk inserters at every declared port.
@@ -38,15 +38,15 @@ The system relies heavily on the LLM deducing the correct module and wiring base
 
 ### 4.1. Separate Placement from Wiring (The Refinement Phase)
 **Implement a post-placement "Wiring/Connection Refinement" step.**
-Instead of failing the entire attempt when routing fails, or forcing the LLM to guess connections upfront:
-1.  **Macro-Design:** The LLM outputs `plan.yaml` focusing *only* on `placements` and the *intent* to connect.
+Instead of failing the entire attempt when connections are missing or mis-paired, or forcing the LLM to define them simultaneously with placement:
+1.  **Macro-Design:** The LLM outputs `plan.yaml` focusing *only* on `placements` first.
 2.  **Verify Placements:** The runner validates and places the modules in the verification clone.
-3.  **Algorithmic Routing / Micro-Design:** Attempt algorithmic routing (`route_belt`). If it fails, or if the LLM needs to explicitly define complex wiring (like circuit networks or fluid pipes later on), feed the *actual* placed coordinates back to the Designer in a rapid, cheap LLM call: *"Placements successful. Here are the exact port coordinates. Provide the `connections` array."*
-4.  **Benefits:** Drastically reduces the cognitive load on the initial design prompt, reduces expensive simulation retries, and allows the LLM to focus on topological wiring with guaranteed, validated starting points.
+3.  **Connection Refinement:** Feed the successful placement data (and actual port coordinates) back to the Designer in a rapid, cheap LLM call: *"Placements successful. Here are the placed modules and their ports. Provide the `connections` array to link them."*
+4.  **Benefits:** Drastically reduces the cognitive load on the initial design prompt. The LLM handles topology *after* layout is locked in. The runner then uses its existing A* pathfinding to execute the provided connections, avoiding expensive simulation retries due to simple omission or mis-pairing in the first step.
 
-### 4.2. Unify the Feedback Loop Architecture
-Address the sequential vs. parallel discrepancy.
-*   If parallel mode is meant for exploration, it should still have a mechanism to share catastrophic failure states (e.g., "Module X's footprint is fundamentally broken") across the parallel pool before the next wave of designs is generated.
+### 4.2. Aggregate and Manage Failure Experience
+Build a structured system to extract and aggregate failure data.
+*   Since parallel exploration naturally produces discarded attempts (saved in raw sessions/jsonl), implement a process to parse, summarize, and manage these failures. This centralized "failure index" can be used to inform future epochs or long-term agent learning, rather than leaving the data siloed.
 
 ### 4.3. Implement the `upgrade` Verb
 As noted in the TODOs, the `plan.preparation` array only supports `deconstruct`.
