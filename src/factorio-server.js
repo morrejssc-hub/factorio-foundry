@@ -307,16 +307,34 @@ function parseKeyValueOutput(output) {
 }
 
 function parseJsonObjectOutput(output, label = "Lua output") {
-  const lines = String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    if (!line.startsWith("{") || !line.endsWith("}")) continue;
-    try {
-      return JSON.parse(line);
-    } catch {
-      // Keep looking; Factorio may have printed diagnostic lines before JSON.
+  const text = String(output || "");
+  let end = text.length;
+
+  while (end > 0) {
+    const start = text.lastIndexOf('\n', end - 1);
+    let lineStart = start === -1 ? 0 : start + 1;
+    let lineEnd = end;
+
+    // Fast-path right trim
+    while (lineEnd > lineStart && text.charCodeAt(lineEnd - 1) <= 32) {
+      lineEnd -= 1;
+    }
+    // Fast-path left trim
+    while (lineStart < lineEnd && text.charCodeAt(lineStart) <= 32) {
+      lineStart += 1;
+    }
+
+    end = start; // Move end pointer for the next line
+
+    if (lineEnd - lineStart >= 2 && text.charCodeAt(lineStart) === 123 /* '{' */ && text.charCodeAt(lineEnd - 1) === 125 /* '}' */) {
+      try {
+        return JSON.parse(text.substring(lineStart, lineEnd));
+      } catch {
+        // Keep looking; Factorio may have printed diagnostic lines before JSON.
+      }
     }
   }
+
   throw new Error(`${label} did not contain a JSON object: ${output || "(empty response)"}`);
 }
 
