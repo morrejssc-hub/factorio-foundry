@@ -12,6 +12,7 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { exists } from "../fs-util.js";
 
 const SIMILARITY_THRESHOLD = 0.6;
@@ -85,16 +86,21 @@ function cluster(records) {
   return clusters;
 }
 
-function summarize(clusters) {
+export function summarize(clusters) {
   return clusters
     .map((c, idx) => {
-      const samples = c.members.map((m) => m.lua || "");
-      const paths = Array.from(new Set(c.members.map((m) => m.script_path).filter(Boolean)));
-      const params = c.members.map((m) => m.params || {});
+      const samples = [];
+      const pathsSet = new Set();
+      const params = [];
+      for (const m of c.members) {
+        samples.push(m.lua || "");
+        if (m.script_path) pathsSet.add(m.script_path);
+        params.push(m.params || {});
+      }
       return {
         cluster_id: idx,
         call_count: c.members.length,
-        script_paths: paths,
+        script_paths: Array.from(pathsSet),
         param_samples: params.slice(0, 5),
         sample_lua: samples[0] || "",
         ...variableLines(samples),
@@ -130,7 +136,9 @@ async function main() {
   console.log(`wrote ${outPath} (${records.length} calls → ${summary.length} clusters)`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
