@@ -23,7 +23,11 @@ const FENCE_HEADER = "## Deployed modules";
 const FENCE_OPEN = "```yaml";
 const FENCE_CLOSE = "```";
 
-const TEMPLATE = `# World notes
+// Machine-managed scaffolding — header + empty fence. Used both to seed a
+// brand-new world.md and to auto-heal an existing file whose scaffolding
+// has been clobbered (agents have a long history of overwriting world.md
+// while leaving the prose intact).
+const SCAFFOLDING = `# World notes
 
 A running journal of what's been built across the epoch chain. The
 \`## Deployed modules\` block below has a yaml fence — runner appends
@@ -38,7 +42,9 @@ ${FENCE_HEADER}
 ${FENCE_OPEN}
 []
 ${FENCE_CLOSE}
+`;
 
+const DEFAULT_NOTES = `
 ## Buffer & overflow notes
 
 (empty)
@@ -51,6 +57,8 @@ ${FENCE_CLOSE}
 
 (empty)
 `;
+
+const TEMPLATE = SCAFFOLDING + DEFAULT_NOTES;
 
 export function worldMdPath(config) {
   return resolve(config.rootDir, "state/world.md");
@@ -91,6 +99,8 @@ export function locateFence(rawText) {
 
 /**
  * Reads world.md, creating it from the template on first access.
+ * Auto-heals existing files whose scaffolding (header / fence) has been
+ * lost — prepends SCAFFOLDING and persists, preserving any prose below.
  */
 export async function readWorldMd(path) {
   let rawText;
@@ -105,8 +115,21 @@ export async function readWorldMd(path) {
       throw e;
     }
   }
-  const fence = locateFence(rawText);
-  return { rawText, entries: fence.entries };
+  try {
+    const fence = locateFence(rawText);
+    return { rawText, entries: fence.entries };
+  } catch (e) {
+    if (!/missing.*header|has no opening fence|fence has no closing/i.test(e.message)) {
+      throw e;
+    }
+    // Heal: prepend the machine-managed scaffolding (header + empty fence)
+    // to whatever prose exists. The original content moves below the fence
+    // and stays intact; no agent edits are lost.
+    const healed = SCAFFOLDING + (rawText.startsWith("\n") ? rawText : "\n" + rawText);
+    await writeFile(path, healed, "utf8");
+    const fence = locateFence(healed);
+    return { rawText: healed, entries: fence.entries };
+  }
 }
 
 /**

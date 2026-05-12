@@ -404,6 +404,8 @@ async function runCompositionEpoch({ config, factorio, epoch, log, inputSaveOver
         item: observeVerdict.item,
         seconds_actual: observeVerdict.seconds_actual,
         produced_delta: observeVerdict.produced_delta,
+        diagnostic_summary: observeVerdict.diagnostic?.summary ?? null,
+        diagnostic_ok: observeVerdict.diagnostic?.ok ?? null,
       } : null,
       error: attemptError,
     });
@@ -814,6 +816,8 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log, input
       item: replay.observeVerdict.item,
       seconds_actual: replay.observeVerdict.seconds_actual,
       produced_delta: replay.observeVerdict.produced_delta,
+      diagnostic_summary: replay.observeVerdict.diagnostic?.summary ?? null,
+      diagnostic_ok: replay.observeVerdict.diagnostic?.ok ?? null,
     };
 
     await promoteWinner(winningRecord.candidateSavePath, winnerPath);

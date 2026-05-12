@@ -110,3 +110,46 @@ test("appendDeployedModule + removeDeployedModules round-trip via filesystem", a
   assert.equal(after2.entries.length, 1);
   assert.equal(after2.entries[0].id, "p1");
 });
+
+test("readWorldMd heals a file missing the header (preserves prose)", async () => {
+  const dir = await freshTmpDir();
+  const path = join(dir, "world.md");
+  const stale = `## Buffer & overflow notes\n\n- some agent note about e4\n\n## Open puzzles\n\n- something else\n`;
+  await writeFile(path, stale, "utf8");
+
+  const { entries } = await readWorldMd(path);
+  assert.deepEqual(entries, []);
+
+  const healed = await readFile(path, "utf8");
+  assert.match(healed, /^# World notes/);
+  assert.match(healed, /## Deployed modules/);
+  assert.match(healed, /```yaml\n\[\]\n```/);
+  assert.match(healed, /some agent note about e4/);
+  assert.match(healed, /## Open puzzles/);
+});
+
+test("readWorldMd heals a file missing the yaml fence (header present)", async () => {
+  const dir = await freshTmpDir();
+  const path = join(dir, "world.md");
+  const stale = `# World notes\n\n## Deployed modules\n\n(fence was wiped)\n\n## Notes\n\n- preserved\n`;
+  await writeFile(path, stale, "utf8");
+
+  const { entries } = await readWorldMd(path);
+  assert.deepEqual(entries, []);
+
+  const healed = await readFile(path, "utf8");
+  assert.match(healed, /```yaml\n\[\]\n```/);
+  assert.match(healed, /preserved/);
+});
+
+test("readWorldMd second read is a no-op once healed", async () => {
+  const dir = await freshTmpDir();
+  const path = join(dir, "world.md");
+  await writeFile(path, "## Some notes\n- a\n", "utf8");
+  const first = await readWorldMd(path);
+  const firstText = await readFile(path, "utf8");
+  const second = await readWorldMd(path);
+  const secondText = await readFile(path, "utf8");
+  assert.deepEqual(second.entries, first.entries);
+  assert.equal(secondText, firstText, "no further mutation on second read");
+});
