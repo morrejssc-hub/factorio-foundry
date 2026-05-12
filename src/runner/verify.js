@@ -34,7 +34,7 @@ function deriveHarnessManifest(plan, modules) {
     if (!mod) continue;
     const ports = [];
     for (const port of [...(mod.inputs || []), ...(mod.outputs || [])]) {
-      if (port.kind === "belt" || port.kind === "inventory") {
+      if (port.kind === "belt") {
         ports.push({
           name: port.name,
           kind: port.kind,
@@ -191,7 +191,7 @@ async function checkPowerCoverage({ controller, plan, modules, perPlacement, out
  * @returns {Promise<{verdict: object, perPlacement: object[], savePath: ?string}>}
  */
 export async function applyCandidate({
-  controller, plan, modules, outDir, dryValidate = true,
+  controller, plan, modules, outDir, dryValidate = true, worldPlacements,
 }) {
   await mkdir(outDir, { recursive: true });
 
@@ -222,7 +222,7 @@ export async function applyCandidate({
 
   // Step 3: route connections — same proposal.json shape as placement.
   try {
-    const connections = await routeConnections({ controller, plan, modules, log: () => {} });
+    const connections = await routeConnections({ controller, plan, modules, log: () => {}, worldPlacements });
     await writeFile(join(outDir, "connections.json"), JSON.stringify(connections, null, 2), "utf8");
   } catch (connError) {
     // routeConnections throws "connection <from>→<to> failed: <reason>".

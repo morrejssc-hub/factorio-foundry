@@ -1,26 +1,26 @@
 // port-entities.js — single source of truth for which Factorio entities
 // can serve a module port of a given kind.
 //
-// Two parallel mappings:
+// A port is a wire medium between modules — items/fluid/power moving
+// from one module to another. Three kinds:
 //
 //   PORT_CONNECTORS    — entities that move flow through a port. The
 //                        port_meter attaches to one of these to read
 //                        throughput (a belt-tile, a pipe-tile, an
 //                        electric pole on the network).
 //
-//   PORT_CONTAINERS    — entities that store flow at a port (chests,
-//                        tanks, accumulators). The port-meter does not
-//                        currently attach to these — they're declared
-//                        for kind: inventory ports and reserved for the
-//                        future fluid/electric storage variants.
+// Storage containers (chests, tanks, accumulators) are NOT ports. They
+// are internal-module buffers. Connect-phase auto-routing only deals
+// in wire mediums; modules that want a buffer chest must keep it
+// internal and expose a belt port at the buffer's downstream edge.
 //
 // `kind` is the discriminator that travels through the module schema:
 //   { name, side, rel_pos, throughput, item, kind } in lib/modules/*.yaml
 //   { entity, kind, item }                          in lib/blueprints/*.json
 //
-// lib-loader.validateModule cross-checks: for kind ∈ {belt, pipe, power}
-// the blueprint port's entity-key must resolve to a prototype in
-// PORT_CONNECTORS[kind]. Catches drift like kind=belt + entity=pipe.
+// lib-loader.validateModule cross-checks: for each port the blueprint
+// port's entity-key must resolve to a prototype in PORT_CONNECTORS[kind].
+// Catches drift like kind=belt + entity=pipe.
 
 export const PORT_CONNECTORS = {
   belt:  ["transport-belt", "fast-transport-belt", "express-transport-belt"],
@@ -28,17 +28,15 @@ export const PORT_CONNECTORS = {
   power: ["small-electric-pole", "medium-electric-pole", "big-electric-pole", "substation"],
 };
 
-export const PORT_CONTAINERS = {
-  inventory: ["wooden-chest", "iron-chest", "steel-chest"],
-  // future: fluid -> ["storage-tank"], electric -> ["accumulator"]
-};
+// Reserved for future expansion (e.g. accumulator-backed electric storage,
+// storage-tank for fluid sinks). Currently empty — chest/tank/accumulator
+// are NOT valid port kinds; keep them internal to module blueprints.
+export const PORT_CONTAINERS = {};
 
 // Kinds that carry flow and have a port-meter implementation.
 export const METERED_KINDS = new Set(Object.keys(PORT_CONNECTORS));
 
-// All valid kind values the schema accepts. Inventory ports are valid
-// (a chest IS the port — items move via inserter, not a connector) but
-// not metered by port-meter.lua in V1.
+// All valid kind values the schema accepts.
 export const ALL_KINDS = new Set([
   ...Object.keys(PORT_CONNECTORS),
   ...Object.keys(PORT_CONTAINERS),

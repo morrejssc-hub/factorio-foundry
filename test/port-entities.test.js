@@ -27,12 +27,8 @@ test("PORT_CONNECTORS lists four electric pole tiers", () => {
   ]);
 });
 
-test("PORT_CONTAINERS lists chest tiers under inventory", () => {
-  assert.deepEqual(PORT_CONTAINERS.inventory, [
-    "wooden-chest",
-    "iron-chest",
-    "steel-chest",
-  ]);
+test("PORT_CONTAINERS is empty — chests/tanks are not valid port kinds", () => {
+  assert.deepEqual(Object.keys(PORT_CONTAINERS), []);
 });
 
 test("METERED_KINDS contains exactly belt/pipe/power", () => {
@@ -48,13 +44,20 @@ test("ALL_KINDS contains every connector and container kind", () => {
   }
 });
 
+test("ALL_KINDS does not include retired inventory kind", () => {
+  assert.equal(ALL_KINDS.has("inventory"), false);
+});
+
 test("isAllowedPortEntity accepts each connector tier", () => {
   assert.equal(isAllowedPortEntity("belt", "transport-belt"), true);
   assert.equal(isAllowedPortEntity("belt", "fast-transport-belt"), true);
   assert.equal(isAllowedPortEntity("pipe", "pipe"), true);
   assert.equal(isAllowedPortEntity("power", "small-electric-pole"), true);
   assert.equal(isAllowedPortEntity("power", "substation"), true);
-  assert.equal(isAllowedPortEntity("inventory", "iron-chest"), true);
+});
+
+test("isAllowedPortEntity rejects retired inventory kind even on a chest", () => {
+  assert.equal(isAllowedPortEntity("inventory", "iron-chest"), false);
 });
 
 test("isAllowedPortEntity rejects mismatched kind/entity", () => {
@@ -71,11 +74,11 @@ test("resolvePortEntityFromBlueprint reads kind/item via entity-key", () => {
   const blueprint = {
     entities: [
       { key: "belt_a", item: "transport-belt", dx: 1, dy: 0 },
-      { key: "chest_a", item: "iron-chest", dx: 4, dy: 0 },
+      { key: "pole_a", item: "small-electric-pole", dx: 4, dy: 0 },
     ],
     ports: {
-      out_belt: { entity: "belt_a", kind: "belt", item: "coal" },
-      out_chest: { entity: "chest_a", kind: "inventory", item: "coal" },
+      out_belt:  { entity: "belt_a", kind: "belt", item: "coal" },
+      power_in:  { entity: "pole_a", kind: "power", item: "electricity" },
     },
   };
   const beltPort = resolvePortEntityFromBlueprint(blueprint, "out_belt");
@@ -86,9 +89,9 @@ test("resolvePortEntityFromBlueprint reads kind/item via entity-key", () => {
     dy: 0,
     kind: "belt",
   });
-  const chestPort = resolvePortEntityFromBlueprint(blueprint, "out_chest");
-  assert.equal(chestPort.entityName, "iron-chest");
-  assert.equal(chestPort.kind, "inventory");
+  const powerPort = resolvePortEntityFromBlueprint(blueprint, "power_in");
+  assert.equal(powerPort.entityName, "small-electric-pole");
+  assert.equal(powerPort.kind, "power");
 });
 
 test("resolvePortEntityFromBlueprint returns null on missing port/entity", () => {
@@ -105,10 +108,11 @@ test("resolvePortEntityFromBlueprint returns null on missing port/entity", () =>
   assert.equal(resolvePortEntityFromBlueprint(blueprint2, "dangling"), null);
 });
 
-test("registrySummary lists every kind on its own line", () => {
+test("registrySummary lists every connector kind on its own line", () => {
   const summary = registrySummary();
   assert.match(summary, /belt: transport-belt/);
   assert.match(summary, /pipe: pipe/);
   assert.match(summary, /power: small-electric-pole/);
-  assert.match(summary, /inventory: wooden-chest/);
+  // inventory is retired — it should NOT appear
+  assert.doesNotMatch(summary, /inventory:/);
 });

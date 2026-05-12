@@ -139,6 +139,17 @@ connections:
   Because current blueprint entity coordinates are not rotated by
   `placements[].direction`, prefer `direction: north` unless you are
   authoring and validating a fully rotation-safe module.
+  **You may leave a belt input unconnected: post-verify, the runner's
+  connect phase auto-routes any unbound `kind: belt` input to the nearest
+  deployed module whose `outputs[]` exposes a `kind: belt` port with the
+  matching `item` (Manhattan distance picks the winner; ties resolve by
+  list order).** Connect phase writes its decisions to `connect.json`
+  alongside the candidate's `observe.json`. Declare an explicit
+  `connections[]` entry only when you want to override the auto-route
+  (e.g. specifying a particular upstream when multiple producers exist).
+  If no deployed module supplies the item, the decision audit records
+  `needs_upstream` and observe will measure 0 for that line — surface
+  this in `scaling_note` if you anticipate it.
 - Ports of kind `power` connect via the runner's pole-routing algorithm.
   Electric modules must declare a `kind: power` input port in module yaml
   and blueprint `ports{}`. Do NOT hand-place extra poles in plan.yaml. If
@@ -338,10 +349,11 @@ must be authored. For each such id:
    "Deployed modules" fence — each entry names a deployed module + its
    anchor + its epoch. For each entry, read `lib/modules/<id>.yaml` to see
    that module's `outputs:` ports. Those ports are your candidate input
-   sources. Their `kind` (belt / inventory / pipe) tells you how to
-   connect: belt-output ↔ belt-input is direct routing; inventory-output
-   (chest) → belt-input requires an inserter, OR you seed your input via
-   `starter_items`.
+   sources. Every inter-module port is `kind: belt` (or `kind: pipe`,
+   `kind: power`) — chest/tank/accumulator are module-internal buffers,
+   not ports. The connect phase auto-routes a belt input to the nearest
+   deployed belt output with the same `item`, so you usually don't need
+   to write explicit `connections[]` entries for belt inputs.
 
 3. **Pick an anchor.** Use `factorio_read tile-info` (or
    `find-placement-anchors` for terrain-sensitive entities) to confirm
@@ -363,7 +375,7 @@ For each id to author:
    inputs: []
    outputs:
      - { name: <port-name>, side: east, rel_pos: [<x>, <y>],
-         throughput: <number>, item: <factorio-item-name>, kind: belt|inventory|pipe|power }
+         throughput: <number>, item: <factorio-item-name>, kind: belt|pipe|power }
    power: { kind: burner, fuel: coal, self_sufficient: <bool> }
    footprint:
      min: [<x>, <y>]    # axis-aligned bbox covering ALL entities
@@ -392,7 +404,12 @@ For each id to author:
    | `belt`      | one of `transport-belt`, `fast-transport-belt`, `express-transport-belt`                   | item rate produced (items/s)                     |
    | `pipe`      | `pipe`                                                                                     | fluid rate produced (fluid/s)                    |
    | `power`     | one of `small-electric-pole`, `medium-electric-pole`, `big-electric-pole`, `substation`    | electric power on the port's network (kW)        |
-   | `inventory` | one of `wooden-chest`, `iron-chest`, `steel-chest`                                         | not metered in V1; declare for chest-output ports|
+
+   Storage entities (chest, tank, accumulator) are NOT valid port kinds —
+   they're module-internal buffers. If your module needs an output buffer
+   chest, keep it internal and expose a transport-belt downstream of the
+   chest as the port. `kind: inventory` is retired and the lib-loader
+   will reject any module declaring it.
 
    The blueprint's `ports{}` map must agree: each entry's `entity` key
    must point to a blueprint entity whose `item` is in the kind's
@@ -481,30 +498,34 @@ For each id to author:
      #   input_chest (iron-chest) at (-2, 0)
      #   feed_inserter (burner-inserter, direction=east) at (-1, 0) — picks from chest, drops on assembler
      ```
-     Use this when the upstream module's output port is `kind: inventory`
-     (a chest) and connecting it cleanly is awkward — but be honest
-     about the running-out problem.
+     Use this for the very first epoch in a chain where no upstream
+     producer exists yet — but be honest about the running-out problem.
 
-     **(B) Cross-module `connections` in plan.yaml:** declare your
-     module's input port as `kind: belt` (or `kind: inventory` for chest
-     pickup), then route from an upstream module's output port via
-     `plan.yaml: connections:`. The runner places transport-belts /
-     inserters along the routed path:
+     **(B) Cross-module `connections` via belt port:** declare your
+     module's input port as `kind: belt` and rely on the runner's
+     connect phase to auto-route from any deployed module whose
+     `outputs[]` exposes a belt port with the matching `item`. You
+     usually do NOT need to write an explicit `connections[]` entry —
+     leaving the input unbound lets the connect phase pick the nearest
+     upstream automatically. Write an explicit entry only when you want
+     to override the auto-route choice (e.g. one of several producers):
      ```yaml
-     # in plan.yaml:
+     # in plan.yaml — explicit override, optional:
      connections:
-       - from: { module_id: e2-first-iron:p0, port: iron_plate_chest }
-         to:   { module_id: <this-placement-id>,  port: iron_plate_in }
+       - from: "e2-first-iron:p0.iron_plate_belt"
+         to:   "<this-placement-id>.iron_plate_in"
+         required_throughput: 0.5
      ```
      Read existing `lib/modules/*.yaml` to see which deployed modules
-     expose what output ports. Belt-to-belt or chest-to-belt-with-inserter
-     are the supported shapes.
+     expose what output ports. All inter-module wiring goes through
+     belt ports — chest/tank/accumulator are module-internal only.
 
      **Common failure mode** — a module that declares an input port but
-     has no `starter_items` AND no `connections` entry feeding it will
-     verify as `measured: 0` (entity has recipe and power but no input).
-     This is silent — verify won't tell you "no input"; you'll just see
-     zero throughput.
+     has no `starter_items` AND no upstream producer exposing the same
+     item via a belt output will measure 0 in observe (the connect phase
+     records `needs_upstream` in `connect.json`). Verify with harness
+     still passes because the harness supplies items from infinity-chests;
+     observe on the clean save measures the real story.
    - Electric blueprints need a `kind: power` input port on the pole that
      should join the grid. The runner connects poles algorithmically. Do
      not hand-place a chain of poles in the plan. Use

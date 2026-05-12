@@ -215,8 +215,18 @@ export async function buildOccupiedTiles(plan, modules, rootDir) {
 //   { from: "p0.coal_belt", to: "p1.coal_in", required_throughput: 0.18 }
 // Connections without a dot (e.g. {from: "p0", to: "p1"}) are skipped —
 // they are informational-only annotations.
-export async function routeConnections({ controller, plan, modules, log }) {
+export async function routeConnections({ controller, plan, modules, log, worldPlacements }) {
   const placementById = new Map(plan.placements.map((p) => [p.id, p]));
+  // Synthesized connections (from connect.js) reference deployed modules
+  // recorded in world.md, not entries in this plan's placements. Their
+  // entities exist in the loaded world but aren't in plan.placements; the
+  // caller passes them in via worldPlacements so we can resolve port world
+  // positions for the `from` side.
+  if (worldPlacements) {
+    for (const [id, entry] of worldPlacements) {
+      if (!placementById.has(id)) placementById.set(id, entry);
+    }
+  }
   const occupied = await buildOccupiedTiles(plan, modules, controller.config.rootDir);
   const connections = [];
   const explicitPowerEndpoints = new Set();
@@ -329,7 +339,12 @@ export async function routeConnections({ controller, plan, modules, log }) {
       connections.push({ from: fromStr, to: toStr, ok, length: routeResult.length });
     } catch (error) {
       log(`[execute][connect] ${fromStr}→${toStr} FAILED: ${error.message}`);
-      connections.push({ from: fromStr, to: toStr, ok: false, error: error.message });
+      connections.push({ from: fromStr, to: toStr, ok: false, error: error.message, synthesized: conn._synthesized === true });
+      // Synthesized connections (auto-route from world.md) are opportunistic
+      // — failure leaves the belt unconsumed (backpressure), which the
+      // producer naturally handles. Only explicit Designer-authored
+      // connections are treated as hard requirements.
+      if (conn._synthesized === true) continue;
       throw new Error(`connection ${fromStr}→${toStr} failed: ${error.message}`);
     }
   }

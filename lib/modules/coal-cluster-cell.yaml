@@ -8,7 +8,7 @@ version: 1
 
 inputs: []
 outputs:
-  - { name: coal_chest, side: east, rel_pos: [4.5, 0.5], throughput: 0.45, item: coal, kind: inventory }
+  - { name: coal_belt, side: south, rel_pos: [2.5, 0.5], throughput: 0.45, item: coal, kind: belt }
 
 power: { kind: burner, fuel: coal, self_sufficient: true }
 

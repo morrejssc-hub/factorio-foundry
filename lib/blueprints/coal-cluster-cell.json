@@ -95,9 +95,9 @@
     }
   ],
   "ports": {
-    "coal_output_chest": {
-      "entity": "coal_chest",
-      "kind": "inventory",
+    "coal_belt": {
+      "entity": "trunk_output",
+      "kind": "belt",
       "item": "coal"
     }
   },

@@ -128,13 +128,18 @@ test("connector-injector rejects when paired_with references unknown sub", async
   assert.ok(errors.some((e) => e.includes("unknown sub")), "errors: " + errors.join("\n"));
 });
 
-test("connector-injector rejects when fragment binds port to non-belt module port", async () => {
+test("connector-injector rejects when fragment binds output to a non-belt port", async () => {
   const modules = await loadAllModules(LIB);
   const decomposition = buildSampleDecomposition();
   const subResults = buildSampleSubResults(decomposition);
-  // coal-burner-cell has both coal_belt (kind:belt) and coal_chest (kind:inventory).
-  // Pointing the contract output at coal_chest must fail the kind check.
-  subResults[0].fragment.ports.coal_out = "c0.coal_chest";
+  // gear-production has a `power_in` input port (kind: power). Pointing a
+  // contract output at a non-belt port must fail the kind check that
+  // connector-injector enforces on inter-region transport-belt connectors.
+  decomposition.subs[0].allowed_modules = ["gear-production"];
+  subResults[0].fragment.placements = [
+    { id: "c0", module: "gear-production", anchor: { x: -45, y: 15 }, direction: "north" },
+  ];
+  subResults[0].fragment.ports.coal_out = "c0.power_in";
   const { plan, errors } = await injectConnectors({
     decomposition, subResults, modules, rootDir: ROOT,
   });

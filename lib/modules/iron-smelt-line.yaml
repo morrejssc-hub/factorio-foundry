@@ -2,7 +2,9 @@
 #
 # Burner mining drill on an iron-ore patch drops ore directly into an adjacent
 # 2x2 stone furnace; an inserter east of the furnace lifts iron-plate output
-# into a chest.
+# into a chest. A second burner-inserter pulls plates from the chest onto an
+# east-side output belt — the chest is now a 2-stage internal buffer that
+# smooths the drill's bursty production into a steady belt flow.
 #
 # Coal input: a transport-belt stub runs east along the south edge (y=+2.5).
 # Two burner-inserters pick coal from that belt and drop it into the drill and
@@ -12,22 +14,23 @@
 # Steady-state output: drill-bottlenecked (~0.25 ore/s → ~0.20 plate/s after
 # inserter overhead).
 id: iron-smelt-line
-version: 2
+version: 3
 
 inputs:
   - { name: coal_in, side: south, rel_pos: [-0.5, 2.5], throughput: 0.36, item: coal, kind: belt }
 
 outputs:
-  - { name: iron_plate_chest, side: east, rel_pos: [4.5, 0.5], throughput: 0.20, item: iron-plate, kind: inventory }
+  - { name: iron_plate_belt, side: east, rel_pos: [6.5, 0.5], throughput: 0.20, item: iron-plate, kind: belt }
 
 power: { kind: burner, fuel: coal, self_sufficient: false }
 
 # Anchor-relative bounding box.
 # Drill 2x2 at (0,0) top edge y=-1; furnace 2x2 at (2,0) same.
+# East: output_inserter→chest→output_belt_inserter→output_belt, ending at x=7.
 # South edge: belt stubs at y=2.5 → max y = 3.0.
 footprint:
   min: [-1.0, -1.0]
-  max: [5.0, 3.0]
+  max: [7.0, 3.0]
 
 preconditions:
   - kind: resource_patch
@@ -38,7 +41,7 @@ preconditions:
 realization:
   blueprint: lib/blueprints/iron-smelt-line.json
   starter_fuel:
-    - { item: coal, count: 30 }   # drill:10 furnace:5 output_inserter:5 fuel_inserters:5+5
+    - { item: coal, count: 35 }   # drill:10 furnace:5 output_inserter:5 output_belt_inserter:5 fuel_inserters:5+5
 
 meters:
   - id: iron-smelt-line-throughput

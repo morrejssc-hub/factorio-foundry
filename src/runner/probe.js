@@ -10,50 +10,22 @@ import { buildLuaCommand } from "../rcon.js";
 import { normalize, STATE_SCHEMA } from "./schema-norm.js";
 import { probeCacheKey, readProbeCache, writeProbeCache } from "./probe-cache.js";
 import { newTrace, writePiTrace } from "./pi-trace.js";
-import { loadAllModules } from "../lib-loader.js";
 import { worldMdPath, readWorldMd } from "./world-md.js";
 
-// Build the chests_to_query list passed to world-census.lua. Reads
-// world.md's deployed-modules fence, looks up each module spec in lib,
-// and computes world coords for every output port of kind "inventory".
-// Returns also the world.md raw text (so we can include its bytes in
-// the probe cache key) and the modules-by-id map (for diagnostics).
-async function buildChestsToQuery({ config }) {
+// Read world.md once at the start of the probe phase. Returns its raw
+// bytes so probe-cache can include them in the cache key (a registry
+// change invalidates the cache). Deployed-modules entries are NOT used
+// for chest queries anymore — kind: inventory is no longer a valid
+// port kind; modules expose belt ports and any internal chests stay
+// internal to the blueprint.
+async function readWorldMdForCache({ config }) {
   const path = worldMdPath(config);
-  let rawText, deployed;
   try {
     const wm = await readWorldMd(path);
-    rawText = wm.rawText;
-    deployed = wm.entries;
+    return { rawText: wm.rawText, deployed: wm.entries };
   } catch (e) {
-    // First-run: file may not exist yet (readWorldMd creates from
-    // template, so this should be rare). Treat as empty registry.
-    return { chests: [], rawText: "", deployed: [] };
+    return { rawText: "", deployed: [] };
   }
-  if (!deployed.length) return { chests: [], rawText, deployed };
-
-  // lib/modules/*.yaml — spec lookup so we know each module's inventory
-  // ports and their rel_pos offsets.
-  const modulesById = await loadAllModules(config.libDir);
-  const chests = [];
-  for (const dep of deployed) {
-    const spec = modulesById.get(dep.module);
-    if (!spec) continue;
-    for (const port of spec.outputs || []) {
-      if (port.kind !== "inventory") continue;
-      // All current modules are anchored north; rel_pos applies as-is.
-      // Direction-aware rotation can be added once a non-north module
-      // ships.
-      const rx = Array.isArray(port.rel_pos) ? port.rel_pos[0] : (port.rel_pos?.x ?? 0);
-      const ry = Array.isArray(port.rel_pos) ? port.rel_pos[1] : (port.rel_pos?.y ?? 0);
-      chests.push({
-        id: `${dep.id}:${port.name}`,
-        world_pos: { x: dep.anchor.x + rx, y: dep.anchor.y + ry },
-        item: port.item,
-      });
-    }
-  }
-  return { chests, rawText, deployed };
 }
 
 function validateState(parsed) {
@@ -88,11 +60,11 @@ export async function runProbe({ controller, epoch, outDir, inputSavePath }) {
   const cacheDir      = resolve(config.rootDir, "state/cache/probe");
   const censusSrc     = resolve(config.libDir, "probes/world-census.lua");
 
-  // Resolve the chests-to-query list from world.md upfront — its bytes go
-  // into the cache key so a deploy that adds a new chest invalidates the
-  // cache; chest contents themselves do not change without the input save
-  // changing, so cached state.yaml remains correct.
-  const { chests: chestsToQuery, rawText: worldMdRaw } = await buildChestsToQuery({ config });
+  // Resolve world.md bytes upfront for the probe cache key — a registry
+  // change invalidates the cache. (Deployed-modules entries no longer
+  // drive chest queries; world-census never receives a chests_to_query
+  // list now that kind: inventory is retired.)
+  const { rawText: worldMdRaw } = await readWorldMdForCache({ config });
 
   // Cache lookup — key: (save bytes, epoch.md bytes, world-census.lua bytes,
   // world.md bytes). world.md bytes ensures registry changes bust the cache.
@@ -122,7 +94,7 @@ export async function runProbe({ controller, epoch, outDir, inputSavePath }) {
   }
 
   const censusLua = await readFile(censusSrc, "utf8");
-  const params    = { radius: 150, cluster_gap: 3, chests_to_query: chestsToQuery };
+  const params    = { radius: 150, cluster_gap: 3, chests_to_query: [] };
   const command   = buildLuaCommand("world-census.lua", censusLua, params);
 
   const trace = newTrace("probe");

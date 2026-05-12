@@ -1,7 +1,7 @@
 {
-  "version": 2,
-  "name": "iron_smelt_line_v2",
-  "description": "Burner mining drill on an iron-ore patch drops ore east into an adjacent stone furnace; output inserter (direction=west: picks from furnace output, drops into chest) lifts iron-plate into a chest. Coal arrives via a south-side transport-belt stub at dy=2.5 (coal_in port); two fuel inserters (direction=south: picks from belt at dy=2.5, drops north to dy=0.5 inside drill/furnace) sustain fuel. Connect coal_in port to an upstream coal source via plan.yaml connections.",
+  "version": 3,
+  "name": "iron_smelt_line_v3",
+  "description": "Burner mining drill on an iron-ore patch drops ore east into an adjacent stone furnace; output inserter (direction=west: picks from furnace output, drops into chest) lifts iron-plate into a chest. A second inserter (direction=west: picks from chest, drops on output belt) feeds an east-flowing transport-belt that is the module's iron_plate_belt port. Coal arrives via a south-side transport-belt stub at dy=2.5 (coal_in port); two fuel inserters (direction=south: picks from belt at dy=2.5, drops north to dy=0.5 inside drill/furnace) sustain fuel. Connect coal_in port to an upstream coal source via plan.yaml connections.",
   "anchor": "burner-mining-drill center; place on an iron-ore patch",
   "entities": [
     {
@@ -34,6 +34,21 @@
       "dx": 4.5,
       "dy": 0.5,
       "direction": "north"
+    },
+    {
+      "key": "output_belt_inserter",
+      "item": "burner-inserter",
+      "dx": 5.5,
+      "dy": 0.5,
+      "direction": "west",
+      "settings": { "fuel": { "item": "coal", "count": 5 } }
+    },
+    {
+      "key": "output_belt",
+      "item": "transport-belt",
+      "dx": 6.5,
+      "dy": 0.5,
+      "direction": "east"
     },
     {
       "key": "coal_in_belt_0",
@@ -86,9 +101,9 @@
       "kind": "belt",
       "item": "coal"
     },
-    "iron_plate_output_chest": {
-      "entity": "iron_chest",
-      "kind": "inventory",
+    "iron_plate_belt": {
+      "entity": "output_belt",
+      "kind": "belt",
       "item": "iron-plate"
     }
   }

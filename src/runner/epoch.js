@@ -22,7 +22,8 @@ import {
   winnerSavePath, resolveInputSave, promoteWinner, writeManifest,
 } from "./run-layout.js";
 import { pickWinner } from "./select-winner.js";
-import { worldMdPath, appendDeployedModule } from "./world-md.js";
+import { worldMdPath, readWorldMd, appendDeployedModule } from "./world-md.js";
+import { synthesizeConnections } from "./connect.js";
 import { exists } from "../fs-util.js";
 
 // dry-validate failures are spatial/recipe/inventory mistakes that the LLM
@@ -61,12 +62,40 @@ async function replayObserveExport({
   controller, epoch, plan, modules, outDir, executeOut, stagedDir,
   savePathOut, log,
 }) {
+  // Auto-route unbound belt inputs from deployed modules. Pure synthesis —
+  // no Factorio I/O. Synthesized connections are appended to the plan;
+  // applyCandidate's routeConnections places them via the same code path
+  // as explicit ones, consulting worldPlacements to resolve `from` refs
+  // that name deployed modules outside this plan.
+  const wm = await readWorldMd(worldMdPath(controller.config));
+  const synth = synthesizeConnections({ plan, modules, worldEntries: wm.entries });
+  await mkdir(outDir, { recursive: true });
+  await writeFile(join(outDir, "connect.json"),
+                  JSON.stringify({ added: synth.added, decisions: synth.decisions }, null, 2),
+                  "utf8");
+  if (synth.added.length > 0) {
+    log(`[epoch ${epoch.id}] connect: auto-routed ${synth.added.length} ` +
+        `belt input${synth.added.length === 1 ? "" : "s"} from deployed modules`);
+  }
+  for (const d of synth.decisions) {
+    if (d.kind === "needs_upstream") {
+      log(`[epoch ${epoch.id}] connect: ${d.input} needs upstream — ${d.reason}`);
+    } else if (d.kind === "kind_not_supported") {
+      log(`[epoch ${epoch.id}] connect: ${d.input} skipped — ${d.reason}`);
+    }
+  }
+  const enrichedPlan = {
+    ...plan,
+    connections: [...(plan.connections || []), ...synth.added],
+  };
+
   const applied = await applyCandidate({
     controller,
-    plan,
+    plan: enrichedPlan,
     modules,
     outDir: executeOut,
     dryValidate: false,
+    worldPlacements: synth.worldPlacements,
   });
   const observeVerdict = await runObserve({
     controller,
@@ -74,12 +103,15 @@ async function replayObserveExport({
     successCriteria: epoch.success_criteria,
     outDir,
     modules,
-    plan,
+    plan: enrichedPlan,
     stagedDir,
   });
   const savePath = await controller.exportZip(savePathOut);
   log(`[epoch ${epoch.id}] winner replay exported — ${savePath}`);
-  return { observeVerdict, savePath, perPlacement: applied.perPlacement };
+  return {
+    observeVerdict, savePath, perPlacement: applied.perPlacement,
+    connect: synth,
+  };
 }
 
 async function stockWorkerInventory(controller, items) {
@@ -202,7 +234,7 @@ async function runCompositionEpoch({ config, factorio, epoch, log, inputSaveOver
       primaryNeedsReset = false;
     }
 
-    let designResult, modules, dryResult, exResult, verdict, observeVerdict;
+    let designResult, modules, dryResult, exResult, verdict, observeVerdict, connectResult;
     let attemptError = null;
     try {
       // Inner retry: design → dry-validate. dry-validate failures are
@@ -310,9 +342,10 @@ async function runCompositionEpoch({ config, factorio, epoch, log, inputSaveOver
           log,
         });
         observeVerdict = replay.observeVerdict;
+        connectResult = replay.connect ?? null;
         log(`[epoch ${epoch.id}] attempt ${attempt}: observe — pass=${observeVerdict.pass} measured=${observeVerdict.measured}`);
         exResult = { savePath: replay.savePath, perPlacement: replay.perPlacement };
-        winning = { designResult, modules, exResult, verdict, observeVerdict, stagedDir, attempt };
+        winning = { designResult, modules, exResult, verdict, observeVerdict, stagedDir, attempt, connect: replay.connect };
       } else {
         previousAttempts.push({
           attempt,
@@ -406,6 +439,10 @@ async function runCompositionEpoch({ config, factorio, epoch, log, inputSaveOver
         produced_delta: observeVerdict.produced_delta,
         diagnostic_summary: observeVerdict.diagnostic?.summary ?? null,
         diagnostic_ok: observeVerdict.diagnostic?.ok ?? null,
+        connect_summary: connectResult ? {
+          added: connectResult.added.length,
+          needs_upstream: connectResult.decisions.filter((d) => d.kind === "needs_upstream").length,
+        } : null,
       } : null,
       error: attemptError,
     });
@@ -818,6 +855,10 @@ async function runParallelCompositionEpoch({ config, factorio, epoch, log, input
       produced_delta: replay.observeVerdict.produced_delta,
       diagnostic_summary: replay.observeVerdict.diagnostic?.summary ?? null,
       diagnostic_ok: replay.observeVerdict.diagnostic?.ok ?? null,
+      connect_summary: replay.connect ? {
+        added: replay.connect.added.length,
+        needs_upstream: replay.connect.decisions.filter((d) => d.kind === "needs_upstream").length,
+      } : null,
     };
 
     await promoteWinner(winningRecord.candidateSavePath, winnerPath);

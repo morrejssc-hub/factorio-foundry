@@ -91,7 +91,7 @@ test("meters[].port rejects unknown port name", async () => {
   }
 });
 
-test("meters[].port rejects port whose kind isn't metered (inventory)", async () => {
+test("meters[].port rejects port whose kind is invalid (inventory retired)", async () => {
   const yaml = VALID_BELT_YAML.replace("kind: belt", "kind: inventory");
   const blueprint = JSON.stringify({
     entities: [{ key: "chest_a", item: "iron-chest", dx: 0, dy: 0 }],
@@ -101,7 +101,7 @@ test("meters[].port rejects port whose kind isn't metered (inventory)", async ()
   try {
     await assert.rejects(
       () => loadAllModules(lib),
-      /port-meter only supports/,
+      /kind invalid: inventory/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -138,8 +138,6 @@ test("validateBlueprint accepts every existing connector tier", () => {
       { key: "p1", item: "pipe" },
       { key: "e1", item: "small-electric-pole" },
       { key: "e2", item: "substation" },
-      { key: "c1", item: "wooden-chest" },
-      { key: "c2", item: "iron-chest" },
     ],
     ports: {
       pb: { entity: "b1", kind: "belt", item: "coal" },
@@ -148,11 +146,16 @@ test("validateBlueprint accepts every existing connector tier", () => {
       pp: { entity: "p1", kind: "pipe", item: "water" },
       pe1: { entity: "e1", kind: "power", item: "electricity" },
       pe2: { entity: "e2", kind: "power", item: "electricity" },
-      pc1: { entity: "c1", kind: "inventory", item: "coal" },
-      pc2: { entity: "c2", kind: "inventory", item: "coal" },
     },
   };
   validateBlueprint(blueprint, "/x.json"); // should not throw
+});
+
+test("validateBlueprint rejects retired kind: inventory", () => {
+  assert.throws(() => validateBlueprint({
+    entities: [{ key: "c", item: "iron-chest" }],
+    ports: { out: { entity: "c", kind: "inventory", item: "coal" } },
+  }, "/x.json"), /kind 'inventory' invalid/);
 });
 
 test("loadAllModules rejects blueprint with kind: electric (real e4 regression)", async () => {
@@ -186,7 +189,7 @@ id: m
 version: 1
 inputs: []
 outputs:
-  - { name: out, side: south, rel_pos: [0, 0], throughput: 1, item: iron-gear-wheel, kind: inventory }
+  - { name: out, side: south, rel_pos: [0, 0], throughput: 1, item: iron-gear-wheel, kind: belt }
 power: { kind: electric }
 footprint:
   min: [0, 0]
@@ -195,8 +198,8 @@ realization:
   blueprint: lib/blueprints/m.json
 `;
   const blueprint = JSON.stringify({
-    entities: [{ key: "chest", item: "iron-chest", dx: 0, dy: 0 }],
-    ports: { out: { entity: "chest", kind: "inventory", item: "iron-gear-wheel" } },
+    entities: [{ key: "belt", item: "transport-belt", dx: 0, dy: 0 }],
+    ports: { out: { entity: "belt", kind: "belt", item: "iron-gear-wheel" } },
   });
   const { lib, root } = await makeLib(yaml, blueprint);
   try {

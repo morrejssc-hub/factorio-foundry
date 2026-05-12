@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "name": "gear_production_v1",
-  "description": "Electric assembling-machine-1 crafts iron-gear-wheel from iron-plates. Burner-inserter feeds plates from west-side input belt; second burner-inserter pulls gears from assembler output onto east-side belt leading to a chest. Anchor = assembling-machine-1 center. power_in is the small-electric-pole north of the assembler; runner connects it to an energized grid.",
+  "version": 2,
+  "name": "gear_production_v2",
+  "description": "Electric assembling-machine-1 crafts iron-gear-wheel from iron-plates. Burner-inserter feeds plates from west-side input belt; second burner-inserter pulls gears from assembler output onto an east-flowing belt that extends one more tile — that outer belt is the gear_belt port. Anchor = assembling-machine-1 center. power_in is the small-electric-pole north of the assembler; runner connects it to an energized grid.",
   "anchor": "assembling-machine-1 center; place on clear grass near electric grid",
   "entities": [
     {
@@ -43,11 +43,11 @@
       "direction": "east"
     },
     {
-      "key": "gear_chest",
-      "item": "iron-chest",
+      "key": "gear_belt",
+      "item": "transport-belt",
       "dx": 4,
       "dy": 0,
-      "direction": "north"
+      "direction": "east"
     },
     {
       "key": "power_pole",
@@ -68,9 +68,9 @@
       "kind": "power",
       "item": "electricity"
     },
-    "gear_chest": {
-      "entity": "gear_chest",
-      "kind": "inventory",
+    "gear_belt": {
+      "entity": "gear_belt",
+      "kind": "belt",
       "item": "iron-gear-wheel"
     }
   },
@@ -78,7 +78,7 @@
     "assembler_on_clear_ground_within_electric_range",
     "input_inserter_feeds_plates_from_belt_to_assembler",
     "output_inserter_picks_gears_from_assembler_onto_output_belt",
-    "output_belt_feeds_into_gear_chest",
+    "output_belt_feeds_into_gear_belt_for_export",
     "power_pole_connects_to_upstream_electric_grid"
   ]
 }

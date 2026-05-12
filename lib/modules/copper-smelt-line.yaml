@@ -3,20 +3,22 @@
 # Geometrically identical to iron-smelt-line — the stone furnace is
 # resource-agnostic and smelts whatever the drill drops into it. The
 # only difference is the precondition (copper-ore patch instead of
-# iron-ore) and the declared output port item (copper-plate). Steady-
-# state output is drill-bottlenecked at ~0.25 ore/s × 1 plate/ore.
+# iron-ore) and the declared output port item (copper-plate). A second
+# inserter pulls plates from the buffer chest onto an east-side output
+# belt, so the port is a transport-belt at dx=6.5. Steady-state output
+# is drill-bottlenecked at ~0.25 ore/s × 1 plate/ore.
 id: copper-smelt-line
-version: 1
+version: 2
 
 inputs: []
 outputs:
-  - { name: copper_plate_chest, side: east, rel_pos: [4.5, 0.5], throughput: 0.20, item: copper-plate, kind: inventory }
+  - { name: copper_plate_belt, side: east, rel_pos: [6.5, 0.5], throughput: 0.20, item: copper-plate, kind: belt }
 
 power: { kind: burner, fuel: coal, self_sufficient: false }
 
 footprint:
   min: [-1.0, -1.0]
-  max: [5.0, 1.0]
+  max: [7.0, 1.0]
 
 preconditions:
   - kind: resource_patch
@@ -27,7 +29,7 @@ preconditions:
 realization:
   blueprint: lib/blueprints/copper-smelt-line.json
   starter_fuel:
-    - { item: coal, count: 20 }   # 10 drill + 5 furnace + 5 inserter; pre-loaded by blueprint fuel[]
+    - { item: coal, count: 25 }   # 10 drill + 5 furnace + 5 output_inserter + 5 output_belt_inserter
 
 meters:
   - id: copper-smelt-line-throughput
