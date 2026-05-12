@@ -106,3 +106,55 @@ export function buildConnectionProposal(conn, error) {
     },
   };
 }
+
+/**
+ * Build a structured failure record for a power-coverage check failure.
+ * Diagnostic fields from port-power-check.lua flow into extra.diagnostic
+ * so the designer prompt can read concrete distances instead of guessing.
+ */
+export function buildPowerProposal({ placement, portName, diagnostic }) {
+  const portHasUpstream = diagnostic?.summary?.port_has_upstream_power;
+  const uncovered = Array.isArray(diagnostic?.uncovered) ? diagnostic.uncovered : [];
+  const rootCause = !portHasUpstream
+    ? "power_port_isolated_from_grid"
+    : "power_entity_off_port_network";
+
+  const suggestions = [];
+  if (rootCause === "power_port_isolated_from_grid") {
+    suggestions.push({
+      type: "shift",
+      rationale: `module's power_in port at ${JSON.stringify(diagnostic?.port_pole?.position)} created a new (unpowered) electric network — move the anchor so the port_pole falls within wire reach of an existing energized pole, or add intermediate poles via plan.connections`,
+    });
+  } else {
+    for (const u of uncovered) {
+      const np = u.nearest_pole_on_port_network;
+      if (np) {
+        suggestions.push({
+          type: "add_intermediate_pole",
+          rationale: `entity ${u.id} (${u.entity_name || "?"}) at ${JSON.stringify(u.position)} is on a different electric network from the module's port_pole; nearest pole on the port network is ${JSON.stringify(np.position)} at distance ${np.distance?.toFixed(2)}`,
+        });
+      } else {
+        suggestions.push({
+          type: "review_blueprint",
+          rationale: `entity ${u.id} (${u.entity_name || "?"}) at ${JSON.stringify(u.position)} not on the port_pole's network and no port-network pole nearby — blueprint may be missing internal poles`,
+        });
+      }
+    }
+  }
+
+  return {
+    failed_step: -1,
+    failed_entity: {
+      item: placement.module,
+      position: placement.anchor,
+      direction: placement.direction,
+    },
+    root_cause: rootCause,
+    suggested_changes: suggestions,
+    extra: {
+      placement_id: placement.id,
+      port_name: portName,
+      diagnostic,
+    },
+  };
+}

@@ -179,3 +179,32 @@ realization:
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("loadAllModules rejects electric module without a power input port", async () => {
+  const yaml = `
+id: m
+version: 1
+inputs: []
+outputs:
+  - { name: out, side: south, rel_pos: [0, 0], throughput: 1, item: iron-gear-wheel, kind: inventory }
+power: { kind: electric }
+footprint:
+  min: [0, 0]
+  max: [1, 1]
+realization:
+  blueprint: lib/blueprints/m.json
+`;
+  const blueprint = JSON.stringify({
+    entities: [{ key: "chest", item: "iron-chest", dx: 0, dy: 0 }],
+    ports: { out: { entity: "chest", kind: "inventory", item: "iron-gear-wheel" } },
+  });
+  const { lib, root } = await makeLib(yaml, blueprint);
+  try {
+    await assert.rejects(
+      () => loadAllModules(lib),
+      /must declare at least one input port with kind: power/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

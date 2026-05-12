@@ -144,6 +144,37 @@ export function resolvePortWorldPos(placement, module, portName) {
   return { x: placement.anchor.x + rotated.x, y: placement.anchor.y + rotated.y };
 }
 
+function endpointRef(id, port) {
+  return `${id}.${port}`;
+}
+
+function parseEndpointRef(raw) {
+  const value = String(raw || "");
+  const dot = value.indexOf(".");
+  if (dot <= 0) return null;
+  return { id: value.slice(0, dot), port: value.slice(dot + 1), ref: value };
+}
+
+async function readElectricCoverage(controller, params) {
+  if (typeof controller.read !== "function") {
+    throw new Error("controller.read is required for electric coverage probe");
+  }
+  const result = await controller.read("query_script", {
+    script: "lib/electric-coverage.lua",
+    params,
+  }, { timeoutMs: 60_000 });
+  const raw = result?.output ?? "";
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`electric_coverage: probe output not JSON: ${String(raw).slice(0, 200)}`);
+  }
+}
+
+function firstArrayItem(value) {
+  return Array.isArray(value) && value.length > 0 ? value[0] : null;
+}
+
 // 2x2 entity types whose center is integer (tile covers center-1 to center).
 const TWO_BY_TWO_ENTITIES = new Set(["burner-mining-drill", "stone-furnace"]);
 
@@ -188,14 +219,17 @@ export async function routeConnections({ controller, plan, modules, log }) {
   const placementById = new Map(plan.placements.map((p) => [p.id, p]));
   const occupied = await buildOccupiedTiles(plan, modules, controller.config.rootDir);
   const connections = [];
+  const explicitPowerEndpoints = new Set();
 
   for (const conn of (plan.connections || [])) {
     const fromStr = conn.from || "";
     const toStr   = conn.to   || "";
-    if (!fromStr.includes(".") || !toStr.includes(".")) continue;
+    const fromEndpoint = parseEndpointRef(fromStr);
+    const toEndpoint = parseEndpointRef(toStr);
+    if (!fromEndpoint || !toEndpoint) continue;
 
-    const [fromId, fromPort] = fromStr.split(".", 2);
-    const [toId,   toPort]   = toStr.split(".", 2);
+    const { id: fromId, port: fromPort } = fromEndpoint;
+    const { id: toId,   port: toPort }   = toEndpoint;
 
     const fromPlacement = placementById.get(fromId);
     const toPlacement   = placementById.get(toId);
@@ -218,14 +252,29 @@ export async function routeConnections({ controller, plan, modules, log }) {
       continue;
     }
 
-    // Auto-routing is belt-only in V1. Pipe/power connections must live
-    // inside a single module, so skip cross-module pairs whose ports are
-    // not both kind: belt rather than emitting belts where they don't
-    // belong.
     const fromKind = findPort(fromModule, fromPort)?.kind;
     const toKind = findPort(toModule, toPort)?.kind;
+    if (fromKind === "power" && toKind === "power") {
+      explicitPowerEndpoints.add(fromEndpoint.ref);
+      explicitPowerEndpoints.add(toEndpoint.ref);
+      log(`[execute][connect] power ${fromStr} (${fromPos.x},${fromPos.y}) → ${toStr} (${toPos.x},${toPos.y})`);
+      try {
+        const result = await controller.action("connect_power", {
+          from: fromPos,
+          to: toPos,
+        });
+        const ok = result?.ok ?? true;
+        log(`[execute][connect] power placed ${fromStr}→${toStr}: ok=${ok} path=${result?.pathLength ?? "n/a"}`);
+        connections.push({ from: fromStr, to: toStr, kind: "power", ok, length: result?.pathLength ?? null });
+        continue;
+      } catch (error) {
+        log(`[execute][connect] power ${fromStr}→${toStr} FAILED: ${error.message}`);
+        connections.push({ from: fromStr, to: toStr, kind: "power", ok: false, error: error.message });
+        throw new Error(`connection ${fromStr}→${toStr} failed: ${error.message}`);
+      }
+    }
     if (fromKind !== "belt" || toKind !== "belt") {
-      log(`[execute][connect] skipping ${fromStr}→${toStr}: only belt-to-belt auto-routing supported in V1 (from=${fromKind} to=${toKind})`);
+      log(`[execute][connect] skipping ${fromStr}→${toStr}: unsupported auto-routing pair (from=${fromKind} to=${toKind})`);
       continue;
     }
 
@@ -282,6 +331,55 @@ export async function routeConnections({ controller, plan, modules, log }) {
       log(`[execute][connect] ${fromStr}→${toStr} FAILED: ${error.message}`);
       connections.push({ from: fromStr, to: toStr, ok: false, error: error.message });
       throw new Error(`connection ${fromStr}→${toStr} failed: ${error.message}`);
+    }
+  }
+
+  for (const placement of (plan.placements || [])) {
+    const module = modules.get(placement.module);
+    if (!module) continue;
+    for (const port of (module.inputs || [])) {
+      if (port.kind !== "power") continue;
+      const ref = endpointRef(placement.id, port.name);
+      if (explicitPowerEndpoints.has(ref)) continue;
+      const portPos = resolvePortWorldPos(placement, module, port.name);
+      if (!portPos) continue;
+
+      let coverage;
+      try {
+        coverage = await readElectricCoverage(controller, {
+          points: [{ id: ref, position: portPos }],
+          radius: 120,
+        });
+      } catch (error) {
+        log(`[execute][connect] auto-power ${ref}: coverage probe failed: ${error.message}`);
+        throw new Error(`connection auto-power:${ref} failed: ${error.message}`);
+      }
+
+      const check = firstArrayItem(coverage?.checks);
+      if (check?.powered) {
+        log(`[execute][connect] auto-power ${ref}: already covered by energized grid`);
+        connections.push({ from: "auto-power", to: ref, kind: "power", ok: true, mode: "already_powered" });
+        continue;
+      }
+      const nearest = check?.nearestPoweredPole;
+      if (!nearest?.position) {
+        log(`[execute][connect] auto-power ${ref}: no powered pole within probe radius`);
+        connections.push({ from: "auto-power", to: ref, kind: "power", ok: false, error: "no_powered_pole_within_radius" });
+        throw new Error(`connection auto-power:${ref} failed: no powered pole within electric coverage probe radius`);
+      }
+      log(`[execute][connect] auto-power ${ref}: nearest powered pole (${nearest.position.x},${nearest.position.y}) → (${portPos.x},${portPos.y})`);
+      try {
+        const result = await controller.action("connect_power", {
+          from: nearest.position,
+          to: portPos,
+        });
+        const ok = result?.ok ?? true;
+        connections.push({ from: "auto-power", to: ref, kind: "power", ok, length: result?.pathLength ?? null });
+      } catch (error) {
+        log(`[execute][connect] auto-power ${ref} FAILED: ${error.message}`);
+        connections.push({ from: "auto-power", to: ref, kind: "power", ok: false, error: error.message });
+        throw new Error(`connection auto-power:${ref} failed: ${error.message}`);
+      }
     }
   }
 

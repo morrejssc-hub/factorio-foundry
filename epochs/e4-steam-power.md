@@ -34,6 +34,8 @@ electricity), and small-electric-pole(s) for power distribution.
 
 Place one instance adjacent to a water source (visible in state.yaml's
 water_patches field) and sustain ≥ 100 kW power output for one minute.
+Use `direction: north` in `plan.yaml`; `steam-power-line`'s blueprint already
+encodes the south-facing boiler/engine entity directions.
 
 Why this epoch exists: e1-e3 use burner-only modules (no electricity).
 Steam power is the prerequisite for assembling-machine-1 and electric-mining-drill.

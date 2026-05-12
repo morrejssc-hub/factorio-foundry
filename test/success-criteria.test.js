@@ -108,12 +108,44 @@ test("evaluateCriteria fails overall if any fails", async () => {
   assert.equal(results[1].pass, false);
 });
 
+test("evaluateCriteria applies phase-scoped criteria only in matching phase", async () => {
+  const criteria = [
+    { kind: "build_only" },
+    { kind: "threshold", phase: "verify", op: ">=", value: 100 },
+    { kind: "threshold", phase: "observe", field: "max_kw", op: ">=", value: 100 },
+  ];
+  const verify = await evaluateCriteria(criteria, ctx({
+    phase: "verify",
+    measured: 0,
+    snapshot: { max_kw: 900 },
+  }));
+  assert.equal(verify.pass, false);
+  assert.equal(verify.results.length, 2);
+  assert.equal(verify.results[1].field, "measured");
+
+  const observe = await evaluateCriteria(criteria, ctx({
+    phase: "observe",
+    measured: 0,
+    snapshot: { max_kw: 900 },
+  }));
+  assert.equal(observe.pass, true);
+  assert.equal(observe.results.length, 2);
+  assert.equal(observe.results[1].field, "max_kw");
+});
+
 test("validateCriteria rejects empty array", () => {
   assert.throws(() => validateCriteria([]), /at least one/);
 });
 
 test("validateCriteria rejects bad kind", () => {
   assert.throws(() => validateCriteria([{ kind: "weird" }]), /kind 'weird'/);
+});
+
+test("validateCriteria rejects bad phase", () => {
+  assert.throws(
+    () => validateCriteria([{ kind: "build_only", phase: "design" }]),
+    /phase 'design' invalid/,
+  );
 });
 
 test("validateCriteria rejects threshold without op", () => {

@@ -53,6 +53,23 @@ async function callValidatePlacement(controller, entities) {
   }
 }
 
+async function callElectricCoverage(controller, entities) {
+  const result = await controller.read("query_script", {
+    script: "lib/electric-coverage.lua",
+    params: { entities, radius: 120 },
+  }, { timeoutMs: 60_000 });
+  const raw = result?.output ?? "";
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`electric_coverage: probe output not JSON: ${String(raw).slice(0, 200)}`);
+  }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 function rotateOffset(rel, direction) {
   // direction: "north" | "east" | "south" | "west" — anchor-relative.
   // Module port rel_pos is defined in the canonical orientation; rotating
@@ -162,6 +179,7 @@ function checkConnections(plan, placedById, modules) {
  */
 export async function runDryValidate({ plan, modules, outDir, controller = null }) {
   const errors = [];
+  const warnings = [];
   if (!Array.isArray(plan.placements) || plan.placements.length === 0) {
     errors.push("plan.placements must be a non-empty array");
   }
@@ -196,6 +214,7 @@ export async function runDryValidate({ plan, modules, outDir, controller = null 
   // from a previous epoch — which dry-validate cannot know about without
   // talking to Factorio.
   let canplaceReport = null;
+  let electricCoverageReport = null;
   if (errors.length === 0 && controller) {
     try {
       const allEntities = [];
@@ -223,6 +242,17 @@ export async function runDryValidate({ plan, modules, outDir, controller = null 
           );
         }
       }
+      if (allEntities.length > 0) {
+        electricCoverageReport = await callElectricCoverage(controller, allEntities);
+        for (const r of asArray(electricCoverageReport.uncovered)) {
+          if (!r?.requiresPower) continue;
+          const pos = r.position ? `(${r.position.x},${r.position.y})` : "(unknown)";
+          const nearest = r.nearestPoweredPole?.position
+            ? ` nearest_powered_pole=(${r.nearestPoweredPole.position.x},${r.nearestPoweredPole.position.y})`
+            : " no_powered_pole_within_radius";
+          warnings.push(`electric coverage: '${r.id || r.name || "?"}' at ${pos} is not powered;${nearest}`);
+        }
+      }
     } catch (err) {
       // A probe failure is itself a dry-validate error — surfacing it is
       // strictly better than silently skipping the check.
@@ -231,12 +261,13 @@ export async function runDryValidate({ plan, modules, outDir, controller = null 
   }
 
   const ok = errors.length === 0;
-  const verdict = { ok, errors, plan_summary: {
+  const verdict = { ok, errors, warnings, plan_summary: {
     placements: plan.placements?.length || 0,
     connections: plan.connections?.length || 0,
     expected_throughput: plan.expected_throughput,
   } };
   if (canplaceReport) verdict.canplace = canplaceReport;
+  if (electricCoverageReport) verdict.electric_coverage = electricCoverageReport;
   await writeFile(resolve(outDir, "dry-validate.json"), JSON.stringify(verdict, null, 2), "utf8");
   return verdict;
 }

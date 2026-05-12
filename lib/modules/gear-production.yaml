@@ -9,8 +9,8 @@
 # Output: burner-inserter at dx=+2 lifts gears from assembler output
 # into an iron-chest at dx=+4 on the east side.
 #
-# Power: small-electric-pole at dy=-2 must connect to the existing
-# electric grid (supplied by steam-power-line or similar).
+# Power input: small-electric-pole at dy=-2. The runner connects this
+# power_in port to the nearest energized electric grid.
 # Inserters are burner-powered (self-fuelled via settings.fuel).
 
 id: gear-production
@@ -18,6 +18,7 @@ version: 1
 
 inputs:
   - { name: iron_plate_in, side: west, rel_pos: [-3, 0], throughput: 0.5, item: iron-plate, kind: belt }
+  - { name: power_in, side: north, rel_pos: [0, -2], throughput: 75, item: electricity, kind: power }
 
 outputs:
   - { name: gear_chest, side: east, rel_pos: [4, 0], throughput: 0.5, item: iron-gear-wheel, kind: inventory }

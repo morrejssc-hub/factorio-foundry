@@ -11,6 +11,7 @@ import {
 } from "./runner/port-entities.js";
 
 const REQUIRED_TOP = ["id", "version", "inputs", "outputs", "footprint", "realization"];
+const REQUIRED_INPUT = ["name", "rel_pos", "throughput", "item", "kind"];
 const REQUIRED_OUTPUT = ["name", "rel_pos", "throughput", "item", "kind"];
 const REQUIRED_REALIZATION = ["blueprint"];
 const KIND_VALUES = ALL_KINDS;
@@ -33,6 +34,20 @@ function validateModule(module, file) {
 
   if (!Array.isArray(module.inputs)) errors.push("inputs must be an array");
   if (!Array.isArray(module.outputs)) errors.push("outputs must be an array");
+  for (const [i, port] of (module.inputs || []).entries()) {
+    for (const key of REQUIRED_INPUT) {
+      if (!(key in port)) errors.push(`inputs[${i}] missing field: ${key}`);
+    }
+    if (port.rel_pos && !isFinitePair(port.rel_pos)) {
+      errors.push(`inputs[${i}].rel_pos must be [x, y]`);
+    }
+    if (port.kind && !KIND_VALUES.has(port.kind)) {
+      errors.push(`inputs[${i}].kind invalid: ${port.kind} (allowed: ${[...KIND_VALUES].join(",")})`);
+    }
+    if (port.throughput !== undefined && !Number.isFinite(port.throughput)) {
+      errors.push(`inputs[${i}].throughput must be a number`);
+    }
+  }
   for (const [i, port] of (module.outputs || []).entries()) {
     for (const key of REQUIRED_OUTPUT) {
       if (!(key in port)) errors.push(`outputs[${i}] missing field: ${key}`);
@@ -56,6 +71,13 @@ function validateModule(module, file) {
   if (module.realization) {
     for (const key of REQUIRED_REALIZATION) {
       if (!(key in module.realization)) errors.push(`realization missing: ${key}`);
+    }
+  }
+
+  if (module.power?.kind === "electric") {
+    const hasPowerInput = (module.inputs || []).some((port) => port?.kind === "power");
+    if (!hasPowerInput) {
+      errors.push("power.kind=electric modules must declare at least one input port with kind: power");
     }
   }
 

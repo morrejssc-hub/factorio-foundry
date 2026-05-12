@@ -5,10 +5,10 @@
 # water to steam, steam-engine converts steam to electricity, small
 # electric poles distribute power.
 #
-# Anchor: boiler center. Must be placed with direction "south" so the
-# boiler's steam output faces into the steam-engine. Offshore-pump
-# sits 2 tiles north of the boiler — the anchor must be picked so
-# (anchor.x + 0, anchor.y - 2) lands on water.
+# Anchor: boiler center. Use placement direction "north"; entity directions
+# are already encoded in the blueprint. Offshore-pump sits 2 tiles north of
+# the boiler — the anchor must be picked so (anchor.x + 0, anchor.y - 2)
+# lands on water.
 
 id: steam-power-line
 version: 1

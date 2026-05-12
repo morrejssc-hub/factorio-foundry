@@ -1,8 +1,8 @@
 {
   "version": 2,
   "name": "steam_power_line_v2",
-  "description": "Single steam-engine power plant: offshore-pump draws water at (dx=0, dy=-2), pipe at (dx=0, dy=-1) carries water to burner boiler at anchor, boiler burns coal to produce steam, steam-engine south of boiler generates electricity, small-electric-poles distribute power. Coal belt-fed from west via burner inserter. Module placed facing south.",
-  "anchor": "boiler center; must be placed on grass with offshore-pump (dx=0, dy=-2) landing on water",
+  "description": "Single steam-engine power plant: offshore-pump draws water at (dx=0, dy=-2), pipe at (dx=0, dy=-1) carries water to burner boiler at anchor, boiler burns coal to produce steam, steam-engine south of boiler generates electricity, small-electric-poles distribute power. Coal belt-fed from west via burner inserter. Entity directions are encoded in this blueprint; plan placement should use direction north.",
+  "anchor": "boiler center; plan direction north; must be placed on grass with offshore-pump (dx=0, dy=-2) landing on water",
   "entities": [
     {
       "key": "boiler",

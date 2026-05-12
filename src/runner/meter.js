@@ -68,12 +68,13 @@ async function advanceWindow(controller, totalTicks, chunkTicks, onAdvance) {
  *                                       fires after each chunk. Verify uses
  *                                       it to drive the harness ticker.
  * @param {number} [args.chunkTicks]   — chunk size; omit for single-shot advance
+ * @param {"verify"|"observe"} [args.phase] — active phase for phase-scoped criteria
  * @returns {Promise<object>} verdict
  */
 export async function runMeterWindow({
   controller, targetMetric, modules, plan, stagedDir, rootDir,
   successCriteria, outDir, outName,
-  onAdvance, chunkTicks,
+  onAdvance, chunkTicks, phase,
 }) {
   const resolved = resolveMeter({
     targetMetric, modules, plan, stagedDir, rootDir,
@@ -122,6 +123,7 @@ export async function runMeterWindow({
   const ctx = {
     measured,
     metric,
+    phase,
     snapshot: after || null,
     executeOk: true,
     countEntities: (name) => controller.countEntitiesByName({ name }),

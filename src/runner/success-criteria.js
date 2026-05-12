@@ -14,6 +14,9 @@
 //     - { kind: threshold, field: max_kw, op: ">=", value: 100 }
 //     - { kind: nonzero, field: stored_kj }
 //
+// Criteria may also be scoped to a phase with `phase: verify` or
+// `phase: observe`. Unscoped criteria apply to both phases.
+//
 //   Allowed snapshot fields are taken from the meter's post-window
 //   output (ctx.snapshot): currently max_kw, stored_kj,
 //   cumulative_produced. The default `field: "measured"` keeps the
@@ -35,6 +38,7 @@
 const KINDS = new Set(["build_only", "nonzero", "threshold", "entity_exists"]);
 const OPS = new Set([">=", ">", "<=", "<", "==", "!="]);
 const SNAPSHOT_FIELDS = new Set(["max_kw", "stored_kj", "cumulative_produced"]);
+const PHASES = new Set(["verify", "observe"]);
 
 function compare(op, a, b) {
   switch (op) {
@@ -61,6 +65,9 @@ export function validateCriteria(criteria) {
     if (!c || typeof c !== "object") throw new Error(`success_criteria[${i}] must be an object`);
     if (!KINDS.has(c.kind)) {
       throw new Error(`success_criteria[${i}].kind '${c.kind}' invalid (allowed: ${[...KINDS].join(", ")})`);
+    }
+    if (c.phase !== undefined && !PHASES.has(c.phase)) {
+      throw new Error(`success_criteria[${i}].phase '${c.phase}' invalid (allowed: ${[...PHASES].join(", ")})`);
     }
     if (c.kind === "threshold") {
       if (!OPS.has(c.op)) throw new Error(`success_criteria[${i}].op '${c.op}' invalid (allowed: ${[...OPS].join(", ")})`);
@@ -180,6 +187,7 @@ export async function evaluateCriteria(criteria, ctx) {
   validateCriteria(criteria);
   const results = [];
   for (const c of criteria) {
+    if (ctx.phase && c.phase && c.phase !== ctx.phase) continue;
     results.push(await evaluateOne(c, ctx));
   }
   return { pass: results.every((r) => r.pass), results };

@@ -22,6 +22,12 @@ about:
   `{entities:[{name,position,direction}]}` plays as a complete blueprint
   (no overlaps, all tiles legal). Use this AFTER you have candidate
   anchors to confirm the full layout fits.
+- `lib/probes/electric-coverage.lua` — **inspect** electric-pole supply
+  coverage for candidate points/entities. Use this for electric modules
+  before proposing an anchor: pass either `points:[{id,position}]` or
+  expanded blueprint `entities:[{id,name|item,position}]`. It reports
+  which electric consumers are not covered by a powered network and the
+  nearest powered pole the runner can connect from.
 
 `tile-info.lua` is also useful for ad-hoc tile-name / entity inspection.
 Do NOT call `factorio_action` — any mutation attempt is a violation.
@@ -85,7 +91,10 @@ place blueprints, seed fuel, wait, verify, and observe — those are not your co
   A `placement` is a **module instance**, not an entity. The blueprint
   specifies the entities; you only pick which module to place and where.
 - `placements[].direction` must be one of `north`, `east`, `south`, `west`
-  (lowercase). Not `0/2/4/6`, not `N/E/S/W`.
+  (lowercase). Not `0/2/4/6`, not `N/E/S/W`. In the current executor,
+  library blueprints usually encode their own entity directions; use
+  `north` unless the module documentation explicitly says the placement
+  direction should be rotated.
 - `placements[].anchor.x` and `.y` must both be numbers (not strings).
 - `connections: []` is required even when there is only one placement.
   Omitting it fails the epoch.
@@ -127,12 +136,19 @@ connections:
 - Ports of kind `belt` connect via transport-belt routes. The executor
   resolves world positions from each module's `rel_pos` (anchor-relative,
   canonical north orientation, rotated by `direction` at placement time).
-- Connections of kind `pipe` or `power` are NOT auto-routed in V1.
-  Multi-module electric or fluid plans must keep their pump→boiler→engine
-  or pole-network chain inside a single module. The executor logs and
-  skips any cross-module `from`/`to` pair whose ports aren't both `belt`,
-  so a stray pipe/power connection won't fail your epoch — it just won't
-  be wired.
+  Because current blueprint entity coordinates are not rotated by
+  `placements[].direction`, prefer `direction: north` unless you are
+  authoring and validating a fully rotation-safe module.
+- Ports of kind `power` connect via the runner's pole-routing algorithm.
+  Electric modules must declare a `kind: power` input port in module yaml
+  and blueprint `ports{}`. Do NOT hand-place extra poles in plan.yaml. If
+  no explicit power connection is declared, the executor auto-connects
+  each unbound `power` input to the nearest energized electric grid. Use
+  `lib/probes/electric-coverage.lua` when choosing an anchor so you can
+  see what is already powered and which candidate entities are uncovered.
+- Ports of kind `pipe` are NOT auto-routed in V1. Fluid chains must stay
+  inside one module unless the module blueprint itself contains the pipe
+  connection.
 - Check that the worker's inventory contains enough transport-belts for the
   route length (estimate: Manhattan distance between the two port positions).
 
@@ -489,11 +505,12 @@ For each id to author:
      verify as `measured: 0` (entity has recipe and power but no input).
      This is silent — verify won't tell you "no input"; you'll just see
      zero throughput.
-   - `small-electric-pole` is 1x1, supplies power within a 7.5-tile
-     radius and connects to other poles within 5.5 tiles via wires.
-     Place one within range of every electric entity you author AND
-     within wire-range of an existing power network (typically e4's
-     steam-power-line poles — read `state/world.md` for its anchor).
+   - Electric blueprints need a `kind: power` input port on the pole that
+     should join the grid. The runner connects poles algorithmically. Do
+     not hand-place a chain of poles in the plan. Use
+     `lib/probes/electric-coverage.lua` against your expanded blueprint
+     entities to see which consumers are unpowered and where the nearest
+     powered pole is; live probe data beats stale `state/world.md` notes.
    - The `footprint` field in your module yaml MUST be a bbox that covers
      every entity in the blueprint. dry-validate computes overlap on this
      bbox between placements.

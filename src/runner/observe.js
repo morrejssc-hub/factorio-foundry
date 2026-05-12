@@ -30,6 +30,7 @@ export async function runObserve({
     successCriteria,
     outDir,
     outName: "observe.json",
+    phase: "observe",
     // No onAdvance / chunkTicks — observe runs the window in a single
     // advanceTicks call; nothing to drive mid-window.
   });

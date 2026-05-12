@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "gear_production_v1",
-  "description": "Electric assembling-machine-1 crafts iron-gear-wheel from iron-plates. Burner-inserter feeds plates from west-side input belt; second burner-inserter pulls gears from assembler output onto east-side belt leading to a chest. Anchor = assembling-machine-1 center. Place within 7.5 tiles of an energized power pole.",
+  "description": "Electric assembling-machine-1 crafts iron-gear-wheel from iron-plates. Burner-inserter feeds plates from west-side input belt; second burner-inserter pulls gears from assembler output onto east-side belt leading to a chest. Anchor = assembling-machine-1 center. power_in is the small-electric-pole north of the assembler; runner connects it to an energized grid.",
   "anchor": "assembling-machine-1 center; place on clear grass near electric grid",
   "entities": [
     {
@@ -62,6 +62,11 @@
       "entity": "input_belt",
       "kind": "belt",
       "item": "iron-plate"
+    },
+    "power_in": {
+      "entity": "power_pole",
+      "kind": "power",
+      "item": "electricity"
     },
     "gear_chest": {
       "entity": "gear_chest",

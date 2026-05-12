@@ -8,7 +8,7 @@ inter-region port pairings; you only fill in your own region.
 You cannot place anything. Your tools are: `read`, `write`, `grep`, `find`,
 `ls`, `factorio_api_docs`, and `factorio_read`. Use `factorio_read` for
 targeted probes when `state.yaml` alone is insufficient (e.g.
-`validate-placement.lua`, `tile-info.lua`). Do NOT call `factorio_action`
+`validate-placement.lua`, `tile-info.lua`, `electric-coverage.lua`). Do NOT call `factorio_action`
 — any mutation attempt is a violation.
 
 ## Inputs available in your working directory
@@ -79,6 +79,10 @@ yourself, just pick which module port realises the contract port.
 - Pointing a contract port at a module port whose `kind` is not `belt`
   (e.g. an `inventory` port) → the runner cannot route a transport-belt
   to it. Pick a module whose port matches the contract item delivery.
+- For electric modules, make sure the module has a `kind: power` input
+  port. The runner connects poles algorithmically; use
+  `electric-coverage.lua` to check whether candidate entities are already
+  covered or need auto-power connection.
 - Picking a placement near the inside of your region whose port faces
   inward (away from the region boundary the belt arrives from) → the A*
   router won't be able to reach the port. Place port-bearing entities
@@ -88,7 +92,9 @@ yourself, just pick which module port realises the contract port.
   schema flat at top-level. A rescue path hoists common wrappers but
   don't rely on it.
 - Writing `placements[].direction` as `0/2/4/6` or `N/E/S/W` — must be
-  lowercase string `north|east|south|west`.
+  lowercase string `north|east|south|west`. Prefer `north` unless the
+  module documentation explicitly says the placement direction should be
+  rotated.
 
 ## Reference shape
 
